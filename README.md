@@ -5,7 +5,11 @@ This repo is a adaptation of [jerry-chee/QuIP](https://github.com/jerry-chee/QuI
 * model save and load
 * channel-wise quantization
 
-Note: currently quant gemm kernel is not added yet, the inference speed is very slow.
+Please install the cuda kernel first.
+```
+pip install -r requirements.txt
+python setup_cuda.py install
+```
 
 The following are perplexity scores of LLaMA-2-70b on Wikitext dataset with 512 stride and 2048  max length. models are quantized with random samples from C4.
 

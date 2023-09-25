@@ -14,6 +14,13 @@ import torch
 import torch.nn as nn
 
 from method import butterfly_factors
+try:
+    import quip_cuda
+    quip_cuda_available = True
+except ImportError:
+    logger.warning('CUDA extension not installed.')
+    quip_cuda = None
+    quip_cuda_available = False
 
 
 class QuantLinear(nn.Module):
@@ -32,6 +39,7 @@ class QuantLinear(nn.Module):
         self.outfeatures = outfeatures
         self.bits = bits
         self.maxq = 2**self.bits - 1
+        self.kernel_switch_threshold = 128
         h1, w1 = butterfly_factors(infeatures)
         h2, w2 = butterfly_factors(outfeatures)
 
@@ -140,46 +148,61 @@ class QuantLinear(nn.Module):
     def forward(self, x):
         out_shape = x.shape[:-1] + (self.outfeatures, )
         x = x.reshape(-1, x.shape[-1]).half()
-        if self.wf.device != self.qweight.device:
-            self.wf = self.wf.to(self.qweight.device)
-        if self.bits in [2, 4, 8]:
-            weight = torch.bitwise_right_shift(
-                torch.unsqueeze(self.qweight,
-                                1).expand(-1, 32 // self.bits, -1),
-                self.wf.unsqueeze(-1)).to(torch.int16 if self.bits ==
-                                          8 else torch.int8)
-            torch.bitwise_and(weight, (2**self.bits) - 1, out=weight)
-            weight = weight.reshape(-1, weight.shape[-1])
-
-        elif self.bits == 3:
-            weight = self.qweight.reshape(self.qweight.shape[0] // 3, 3, 1,
-                                          self.qweight.shape[1]).expand(
-                                              -1, -1, 12, -1)
-            weight = (weight >> self.wf.unsqueeze(-1)) & 0x7
-            weight[:, 0, 10] = (weight[:, 0, 10] & 0x3) | (
-                (weight[:, 1, 0] << 2) & 0x4)
-            weight[:, 1, 11] = (weight[:, 1, 11] & 0x1) | (
-                (weight[:, 2, 0] << 1) & 0x6)
-            weight = weight & 0x7
-            weight = torch.cat(
-                [weight[:, 0, :11], weight[:, 1, 1:12], weight[:, 2, 1:11]],
-                dim=1)
-            weight = weight.reshape(-1, weight.shape[-1])
-        else:
-            raise NotImplementedError("Only 2,3,4,8 bits are supported.")
-        weight = self.scale * ((weight / self.maxq) * 2 - 1)
         batch_size = x.shape[0]
+        # scale
         x = x / self.scale_hw[None, :]
+        # matmul V
         x = x[:, self.v_inp].view(batch_size, self.v1.shape[0],
                                   self.v2.shape[0])
         x = torch.matmul(torch.matmul(self.v1, x),
                          self.v2.T).view(batch_size, -1)[:, self.v_outp]
-        out = torch.matmul(x, weight.half())
+        # matmul weight
+        if quip_cuda_available and x.shape[0] < self.kernel_switch_threshold:
+            out = torch.zeros(x.shape[0], self.outfeatures, dtype=torch.float, device=x.device)
+            if self.bits == 2:
+                quip_cuda.vecquant2matmul(x, self.qweight, out, self.scale.float())
+            elif self.bits == 3:
+                quip_cuda.vecquant3matmul(x, self.qweight, out, self.scale.float())
+            elif self.bits == 4:
+                quip_cuda.vecquant4matmul(x, self.qweight, out, self.scale.float())
+            else:
+                raise NotImplementedError("Only 2,3,4 bits are supported.")
+        else:
+            if self.wf.device != self.qweight.device:
+                self.wf = self.wf.to(self.qweight.device)
+            if self.bits in [2, 4, 8]:
+                weight = torch.bitwise_right_shift(
+                    torch.unsqueeze(self.qweight,
+                                    1).expand(-1, 32 // self.bits, -1),
+                    self.wf.unsqueeze(-1)).to(torch.int16 if self.bits ==
+                                              8 else torch.int8)
+                torch.bitwise_and(weight, (2**self.bits) - 1, out=weight)
+                weight = weight.reshape(-1, weight.shape[-1])
+
+            elif self.bits == 3:
+                weight = self.qweight.reshape(self.qweight.shape[0] // 3, 3, 1,
+                                              self.qweight.shape[1]).expand(
+                                                  -1, -1, 12, -1)
+                weight = (weight >> self.wf.unsqueeze(-1)) & 0x7
+                weight[:, 0, 10] = (weight[:, 0, 10] & 0x3) | (
+                    (weight[:, 1, 0] << 2) & 0x4)
+                weight[:, 1, 11] = (weight[:, 1, 11] & 0x1) | (
+                    (weight[:, 2, 0] << 1) & 0x6)
+                weight = weight & 0x7
+                weight = torch.cat(
+                    [weight[:, 0, :11], weight[:, 1, 1:12], weight[:, 2, 1:11]],
+                    dim=1)
+                weight = weight.reshape(-1, weight.shape[-1])
+            else:
+                raise NotImplementedError("Only 2,3,4,8 bits are supported.")
+            weight = self.scale * ((weight / self.maxq) * 2 - 1)
+            out = torch.matmul(x, weight.half())
+        # matmul U
         out = out[:, self.u_outp].view(batch_size, self.u1.shape[0],
-                                       self.u2.shape[0])
+                                       self.u2.shape[0]).half()
         out = torch.matmul(torch.matmul(self.u1.T, out),
                            self.u2).view(batch_size, -1)[:, self.u_inp]
 
-        out = out.half().reshape(out_shape)
+        out = out.reshape(out_shape)
         out = out + self.bias if self.bias is not None else out
         return out
