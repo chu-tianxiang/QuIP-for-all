@@ -1,3 +1,4 @@
+# Modified from https://github.com/huggingface/optimum/blob/main/optimum/gptq/quantizer.py
 # Copyright 2023 HuggingFace Inc. team and GPTQ and AutoGPTQ authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,36 +12,32 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import copy
 import json
 import os
+from pathlib import Path
 from logging import getLogger
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
 from tqdm.auto import tqdm
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
 from transformers.pytorch_utils import Conv1D
 from accelerate import (
     Accelerator,
     cpu_offload_with_hook,
-    load_checkpoint_and_dispatch,
+    init_empty_weights,
 )
 from accelerate.hooks import remove_hook_from_module
+from safetensors.torch import load_file
 
 from constants import QUIP_CONFIG
 from data import get_dataset, prepare_dataset
-from utils import (
-    get_block_name_with_pattern,
-    get_device,
-    get_layers,
-    get_preceding_modules,
-    get_seqlen,
-    recurse_getattr
-)
-from quip import Balance
+from utils import (get_block_name_with_pattern, get_device, get_layers,
+                   get_preceding_modules, get_seqlen, recurse_getattr)
+from quip import QUIP
 from qlinear import QuantLinear
+from codebook import codebook_id
 
 logger = getLogger(__name__)
 
@@ -52,47 +49,59 @@ class QuipQuantizer(object):
 
     def __init__(
         self,
-        bits: int,
+        codebook: str,
         dataset: Optional[Union[List[str], str]] = None,
-        nsamples: int = 1024,
+        nsamples: int = 4096,
         model_seqlen: int = 2048,
-        quant: str = 'ldlq',
-        npasses: int = 0,
-        per_channel: bool = True,
-        damp_percent: float = 0.01,
-        true_sequential: bool = True,
+        quip_tune_iters: int = 10,
+        sigma_reg: float = 0.01,
+        rescale_WH: bool = False,
+        scale_override: float = -1,
+        sequential: bool = False,
         block_name_to_quantize: Optional[str] = None,
         module_name_preceding_first_block: Optional[List[str]] = None,
         batch_size: int = 1,
         pad_token_id: Optional[int] = None,
+        inference: bool = False,
+        cache_on_gpu: bool = False,
         *args,
         **kwargs,
     ):
-        self.bits = bits
         self.dataset = dataset
         self.nsamples = nsamples
-        self.quant = quant
-        self.npasses = npasses
-        self.per_channel = per_channel
-        self.damp_percent = damp_percent
+        self.quip_tune_iters = quip_tune_iters
+        self.sigma_reg = sigma_reg
         self.model_seqlen = model_seqlen
-        self.true_sequential = true_sequential
+        self.rescale_WH = rescale_WH
+        self.scale_override = scale_override
+        self.sequential = sequential
         self.block_name_to_quantize = block_name_to_quantize
         self.module_name_preceding_first_block = module_name_preceding_first_block
         self.batch_size = batch_size
         self.pad_token_id = pad_token_id
+        self.cache_on_gpu = cache_on_gpu
         self.quant_method = 'QUiP'
 
-        if self.bits not in [2, 3, 4, 8]:
-            raise ValueError("only support quantize to [2,3,4,8] bits.")
-        if not (0 < self.damp_percent < 1):
+        if codebook not in ["D4", "E8P12"]:
+            raise ValueError("Invalid codebook, has to be D4 or E8P12")
+        self.codebook = codebook_id[codebook](inference=inference)
+
+        if not (0 < self.sigma_reg < 1):
             raise ValueError("damp_percent must between 0 and 1.")
 
     def to_dict(self):
         """
         Returns the args in dict format.
         """
-        return copy.deepcopy(self.__dict__)
+        return {
+            "quant_method": "QUiP",
+            "rescale_WH": self.rescale_WH,
+            "codebook": self.codebook.id,
+            "codesz": self.codebook.codesz,
+            "idx_dtype": str(self.codebook.idx_dtype),
+            "lora_rank": 0,
+            "outlier_channel_split": False,
+        }
 
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]):
@@ -170,9 +179,14 @@ class QuipQuantizer(object):
                 elif isinstance(layer, Conv1D):
                     in_features = layer.weight.shape[0]
                     out_features = layer.weight.shape[1]
-                new_layer = QuantLinear(self.bits, in_features, out_features)
+                new_layer = QuantLinear(in_features,
+                                        out_features,
+                                        self.codebook,
+                                        self.rescale_WH,
+                                        bias=(layer.bias is not None))
                 new_layer.device = device
-                setattr(module, attr, new_layer.to(device))
+                #setattr(module, attr, new_layer.to(device))
+                setattr(module, attr, new_layer)
         for name1, child in module.named_children():
             self._replace_by_quant_layers(
                 child, names, name + "." + name1 if name != "" else name1)
@@ -248,6 +262,7 @@ class QuipQuantizer(object):
         elif isinstance(self.dataset, str):
             dataset = get_dataset(self.dataset,
                                   tokenizer,
+                                  nsamples=self.nsamples,
                                   seqlen=self.model_seqlen,
                                   split="train")
         elif isinstance(self.dataset, list):
@@ -297,7 +312,8 @@ class QuipQuantizer(object):
                     input = kwargs["hidden_states"]
                 else:
                     raise ValueError("No input value found in the foward pass")
-            layer_inputs.append(input)
+            layer_inputs.append(
+                input.to('cpu') if not self.cache_on_gpu else input)
             other_kwargs = {}
             for k, v in kwargs.items(
             ):  # make sure other arguments also be captured
@@ -310,12 +326,13 @@ class QuipQuantizer(object):
                                                      with_kwargs=True)
         for data in dataset:
             for k, v in data.items():
-                # put the data on gpu, we won't put them back to cpu
                 data[k] = v.to(0)
             try:
                 model(**data)
             except ValueError:
                 pass
+            for k, v in data.items():
+                data[k] = v.cpu()
 
         handle.remove()
         if not has_device_map:
@@ -341,11 +358,7 @@ class QuipQuantizer(object):
             if not has_device_map or get_device(block) == torch.device("cpu"):
                 block = block.to(0)
             layers = get_layers(block)
-            if self.true_sequential:
-                # lazy sequential but works well
-                layers_name_list = [[key] for key in layers.keys()]
-            else:
-                layers_name_list = [list(layers.keys())]
+            layers_name_list = [list(layers.keys())]
             logger.info(f"Module to quantize {layers_name_list}")
             for subset_name_list in tqdm(
                     layers_name_list,
@@ -359,14 +372,8 @@ class QuipQuantizer(object):
                 handles = []
                 # add hook for each layer in subset_layers
                 for name in subset_layers:
-                    quant_method[name] = Balance(subset_layers[name],
-                                                 self.quant, self.bits,
-                                                 self.npasses)
-                    quant_method[name].quantizer.configure(
-                        bits=self.bits,
-                        sym=False,
-                        perchannel=self.per_channel,
-                        qfn="b")
+                    quant_method[name] = QUIP(subset_layers[name],
+                                              self.codebook)
 
                     def add_batch(name):
 
@@ -381,33 +388,42 @@ class QuipQuantizer(object):
                         add_batch(name)))
                 # update Hessian for each layer in subset_layers thanks to the hook
                 for j in range(len(dataset)):
-                    # the args are already on the gpu
-                    # don't need to store the output
-                    #print(j, layer_inputs[j].dtype)
-                    block(layer_inputs[j], **layer_input_kwargs[j])
+                    layer_input = layer_inputs[j].to(get_device(
+                        block)) if not self.cache_on_gpu else layer_inputs[j]
+                    layer_output = block(layer_input,
+                                         **layer_input_kwargs[j])[0]
+                    layer_outputs.append(layer_output.cpu(
+                    ) if not self.cache_on_gpu else layer_output)
                 # remove hook
                 for h in handles:
                     h.remove()
                 for name in subset_name_list:
                     logger.info(
                         f"Quantizing {name} in block {i + 1}/{len(blocks)}...")
-                    quant_method[name].preproc(preproc_gptqH=True,
-                                               percdamp=True,
-                                               preproc_rescale=True,
-                                               preproc_proj=True)
-                    qweight, scale, scaleWH, subU, subV = quant_method[
-                        name].fasterquant()
-                    quantizers[f"{self.block_name_to_quantize}.{i}.{name}"] = (
-                        quant_method[name].quantizer.to("cpu"),
-                        qweight.to('cpu'), scale.to("cpu"), scaleWH.to("cpu"),
-                        subU, subV)
+                    old_weight = quant_method[name].layer.weight.data.clone()
+                    attr = quant_method[name].quant(
+                        rescale_WH=self.rescale_WH,
+                        sigma_reg=self.sigma_reg,
+                        quip_tune_iters=self.quip_tune_iters,
+                        scale_override=self.scale_override)
+                    quantizers[
+                        f"{self.block_name_to_quantize}.{i}.{name}"] = attr
+                    new_weight = quant_method[name].layer.weight.data.clone()
+                    print(
+                        f"mse loss {(new_weight-old_weight).pow(2).mean().sqrt()}"
+                    )
                     quant_method[name].free()
                 del subset_layers
             # we get the new output from the partial quantized block
-            for j in range(len(dataset)):
-                layer_output = block(layer_inputs[j],
-                                     **layer_input_kwargs[j])[0]
-                layer_outputs.append(layer_output)
+            if self.sequential:
+                layer_outputs = []
+                for j in range(len(dataset)):
+                    layer_input = layer_inputs[j].to(get_device(
+                        block)) if not self.cache_on_gpu else layer_inputs[j]
+                    layer_output = block(layer_input,
+                                         **layer_input_kwargs[j])[0]
+                    layer_outputs.append(layer_output.cpu(
+                    ) if not self.cache_on_gpu else layer_output)
 
             # put back to device
             if not has_device_map:
@@ -444,21 +460,15 @@ class QuipQuantizer(object):
         """
         logger.info("Packing model...")
         layers = get_layers(model)
-        layers = {n: layers[n] for n in quantizers}
+        layers = {n: layers[n].to('cpu') for n in quantizers}
         self._replace_by_quant_layers(model, quantizers)
         qlayers = get_layers(model, [QuantLinear])
         for name in qlayers:
             logger.info(name)
-            quantizers[
-                name], qweight, scale, scale_wh, sub_u, sub_v = quantizers[
-                    name]
-            # so far can only pack layer on CPU
+            attr = quantizers[name]
             layer_device = qlayers[name].device
-            qlayers[name].to("cpu")
-            layers[name], scale, scale_wh = layers[name].to('cpu'), scale.to(
-                'cpu'), scale_wh.to('cpu')
-            qlayers[name].pack(layers[name], qweight, scale, scale_wh, sub_u,
-                               sub_v)
+            qlayers[name] = qlayers[name].to("cpu")
+            qlayers[name].pack(layers[name], attr)
             qlayers[name].to(layer_device)
 
         logger.info("Model packed.")
@@ -497,58 +507,27 @@ class QuipQuantizer(object):
                                save_dir,
                                max_shard_size=max_shard_size,
                                safe_serialization=safe_serialization)
+        if hasattr(model, "config"):
+            model.config.save_pretrained(save_dir)
         with open(os.path.join(save_dir, QUIP_CONFIG), "w",
                   encoding="utf-8") as f:
             json.dump(self.to_dict(), f, indent=2)
 
 
 def load_quantized_model(
-    model: nn.Module,
     save_folder: str,
-    quant_config_name: str = QUIP_CONFIG,
-    state_dict_name: Optional[str] = None,
-    device_map: Optional[str] = None,
-    max_memory: Optional[Dict] = None,
-    no_split_module_classes: Optional[Dict] = None,
-    offload_folder: Optional[str] = None,
-    offload_buffers: Optional[str] = None,
-    offload_state_dict: bool = False,
-    max_input_length: Optional[int] = None,
+    revision: Optional[str] = None,
+    torch_dtype: Optional[Union[str, torch.dtype]] = torch.float16,
+    trust_remote_code: bool = True,
 ):
     """
     Load quantized weights from the save_folder into the converted model and dispatch the weights according to the device_map.
 
     Args:
-        model (`nn.Module`):
-            The model can be enpty or not.
         save_folder (`str`):
             Directory to which to load the weights.
         quant_config_name (`str`, defaults to `QUIP_CONFIG`):
             Name of the quantization config file
-        state_dict_name (`Optional[str]`, defaults to `None`):
-            Name of the state dict file
-        device_map (`Optional[str]`, defaults to `None`):
-            A map that specifies where each submodule should go. It doesn't need to be refined to each parameter/buffer
-            name, once a given module name is inside, every submodule of it will be sent to the same device.
-            To have Accelerate compute the most optimized `device_map` automatically, set `device_map="auto"`.
-        max_memory (`Optional[Dict]`, defaults to `None`):
-            A dictionary device identifier to maximum memory. Will default to the maximum memory available for each GPU
-            and the available CPU RAM if unset.
-        no_split_module_classes (`Optional[Dict]`, defaults to `None`):
-            A list of layer class names that should never be split across device (for instance any layer that has a
-            residual connection).
-        offload_folder (`Optional[str]`, defaults to `None`):
-            If the `device_map` contains any value `"disk"`, the folder where we will offload weights.
-        offload_buffers (`Optional[str]`, defaults to `None`):
-            In the layers that are offloaded on the CPU or the hard drive, whether or not to offload the buffers as
-            well as the parameters.
-        offload_state_dict (`bool`, defaults to `False`):
-            If `True`, will temporarily offload the CPU state dict on the hard drive to avoid getting out of CPU RAM if
-            the weight of the CPU state dict + the biggest shard does not fit. Will default to `True` if the device map
-            picked contains `"disk"` values.
-        max_input_length (`Optional[int]`, defaults to `None`):
-            The maximum input length. This is needed to initialize a buffer that depends on the maximum expected input length.
-            It is specific to the exllama backend with act-order.
 
     Returns:
         `nn.Module`: The quantized model
@@ -556,35 +535,61 @@ def load_quantized_model(
     if not torch.cuda.is_available():
         raise RuntimeError(
             "No GPU found. A GPU is needed to run quantized model.")
-    if device_map is None:
-        device_map = {"": torch.cuda.current_device()}
-        logger.info(
-            "The device_map was not initialized."
-            "Setting device_map to `{'':torch.cuda.current_device()}`.")
 
-    with open(os.path.join(save_folder, quant_config_name),
-              "r",
-              encoding="utf-8") as f:
-        quantize_config_dict = json.load(f)
+    config = AutoConfig.from_pretrained(save_folder,
+                                        trust_remote_code=trust_remote_code,
+                                        revision=revision)
+    with init_empty_weights(include_buffers=False):
+        model = AutoModelForCausalLM.from_config(
+            config,
+            trust_remote_code=trust_remote_code,
+            torch_dtype=torch_dtype)
+
+    if hasattr(config, "quantization_config"):
+        quantize_config_dict = config.quantization_config
+    else:
+        with open(os.path.join(save_folder, QUIP_CONFIG)) as f:
+            quantize_config_dict = json.load(f)
+    quantize_config_dict["inference"] = True
     quantizer = QuipQuantizer.from_dict(quantize_config_dict)
-    quantizer.max_input_length = max_input_length
+    quantizer.codebook = quantizer.codebook.to(torch_dtype)
 
     model = quantizer.convert_model(model)
+    model.codebook = quantizer.codebook
 
-    if no_split_module_classes is None:
-        no_split_module_classes = quantizer.get_no_split_module_classes(model)
+    checkpoint_dir = Path(save_folder)
+    pt_model_map_json = checkpoint_dir / "pytorch_model.bin.index.json"
+    st_model_map_json = checkpoint_dir / "model.safetensors.index.json"
+    pt_model = checkpoint_dir / "pytorch_model.bin"
+    st_model = checkpoint_dir / "model.safetensors"
+    if pt_model_map_json.is_file() or st_model_map_json.is_file():
+        model_map_json = pt_model_map_json if pt_model_map_json.is_file(
+        ) else st_model_map_json
+        with open(model_map_json) as json_map:
+            bin_index = json.load(json_map)
+        bin_files = {
+            checkpoint_dir / bin
+            for bin in bin_index["weight_map"].values()
+        }
+    elif pt_model.is_file():
+        bin_files = {pt_model}
+    elif st_model.is_file():
+        bin_files = {st_model}
+    else:
+        return None
 
-    model = load_checkpoint_and_dispatch(
-        model,
-        checkpoint=os.path.join(save_folder, state_dict_name)
-        if state_dict_name is not None else save_folder,
-        device_map=device_map,
-        max_memory=max_memory,
-        no_split_module_classes=no_split_module_classes,
-        offload_folder=offload_folder,
-        offload_buffers=offload_buffers,
-        offload_state_dict=offload_state_dict,
-    )
+    checkpoint = {}
+    for file in sorted(bin_files):
+        if str(file).endswith(".bin"):
+            state_dict = torch.load(str(file),
+                                    map_location="cpu",
+                                    mmap=True,
+                                    weights_only=True)
+        else:
+            state_dict = load_file(str(file), device="cpu")
+        checkpoint.update(state_dict)
+
+    model.load_state_dict(checkpoint, assign=True, strict=False)
 
     model.is_quantized = True
     model.eval()

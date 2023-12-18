@@ -1,3 +1,4 @@
+# https://github.com/huggingface/optimum/blob/main/optimum/gptq/data.py
 #  Copyright 2023 The HuggingFace Team. All rights reserved.
 #
 #  Licensed under the Apache License, Version 2.0 (the "License");
@@ -51,7 +52,8 @@ def prepare_dataset(examples: List[Dict[str, torch.LongTensor]],
             "You need to pass a `pad_token_id` in `quantize_model` if you want to have examples with batch size > 1"
         )
     new_examples = [
-        collate_data(new_examples[start:start + batch_size], pad_token_id)
+        collate_data(new_examples[start:start + batch_size],
+                     pad_token_id=pad_token_id)
         for start in range(0, len(new_examples), batch_size)
     ]
     return new_examples
@@ -128,7 +130,7 @@ def get_wikitext2(tokenizer: Any,
     enc = tokenizer(text, return_tensors="pt")
     dataset = []
     for k in range(nsamples):
-        i = random.randint(0, enc.input_ids.shape[1] - seqlen - 1)
+        i = random.randint(0, enc.input_ids.shape[1] - seqlen)
         j = i + seqlen
         inp = enc.input_ids[:, i:j]
         attention_mask = torch.ones_like(inp)
@@ -159,7 +161,7 @@ def get_c4(tokenizer: Any, seqlen: int, nsamples: int, split: str = "train"):
             enc = tokenizer(data[i]["text"], return_tensors="pt")
             if enc.input_ids.shape[1] >= seqlen:
                 break
-        i = random.randint(0, enc.input_ids.shape[1] - seqlen - 1)
+        i = random.randint(0, enc.input_ids.shape[1] - seqlen)
         j = i + seqlen
         inp = enc.input_ids[:, i:j]
         attention_mask = torch.ones_like(inp)
@@ -194,7 +196,7 @@ def get_c4_new(tokenizer: Any,
             enc = tokenizer(data[i]["text"], return_tensors="pt")
             if enc.input_ids.shape[1] >= seqlen:
                 break
-        i = random.randint(0, enc.input_ids.shape[1] - seqlen - 1)
+        i = random.randint(0, enc.input_ids.shape[1] - seqlen)
         j = i + seqlen
         inp = enc.input_ids[:, i:j]
         attention_mask = torch.ones_like(inp)
@@ -215,7 +217,7 @@ def get_ptb(tokenizer: Any, seqlen: int, nsamples: int, split: str = "train"):
 
     dataset = []
     for _ in range(nsamples):
-        i = random.randint(0, enc.input_ids.shape[1] - seqlen - 1)
+        i = random.randint(0, enc.input_ids.shape[1] - seqlen)
         j = i + seqlen
         inp = enc.input_ids[:, i:j]
         attention_mask = torch.ones_like(inp)
@@ -237,7 +239,7 @@ def get_ptb_new(tokenizer: Any,
 
     dataset = []
     for _ in range(nsamples):
-        i = random.randint(0, enc.input_ids.shape[1] - seqlen - 1)
+        i = random.randint(0, enc.input_ids.shape[1] - seqlen)
         j = i + seqlen
         inp = enc.input_ids[:, i:j]
         attention_mask = torch.ones_like(inp)

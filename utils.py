@@ -11,7 +11,6 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-
 from logging import getLogger
 from typing import Optional, Union
 import functools
@@ -23,9 +22,6 @@ from transformers.pytorch_utils import Conv1D
 from constants import BLOCK_PATTERNS, SEQLEN_KEYS_TRANFORMERS
 
 logger = getLogger(__name__)
-"""
-Set of utilities to get specific attributes of a model
-"""
 
 
 def get_layers(module: nn.Module,
