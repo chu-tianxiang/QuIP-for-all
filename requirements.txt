@@ -2,4 +2,4 @@ transformers
 accelerate
 torch
 datasets
-primefac
+fast-hadamard-transform

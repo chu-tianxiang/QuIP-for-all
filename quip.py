@@ -155,7 +155,6 @@ class QUIP:
                                          quip_tune_iters,
                                          buf_cols=128)
         hat_w = hat_w * w_scale
-        print(hat_w.shape, self.layer.weight.data.shape)
 
         w = (matmul_hadU((matmul_hadU(hat_w)[..., :self.columns] *
                           self.SU.to(self.dev)).T)[..., :self.rows] *

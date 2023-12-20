@@ -408,10 +408,6 @@ class QuipQuantizer(object):
                         scale_override=self.scale_override)
                     quantizers[
                         f"{self.block_name_to_quantize}.{i}.{name}"] = attr
-                    new_weight = quant_method[name].layer.weight.data.clone()
-                    print(
-                        f"mse loss {(new_weight-old_weight).pow(2).mean().sqrt()}"
-                    )
                     quant_method[name].free()
                 del subset_layers
             # we get the new output from the partial quantized block

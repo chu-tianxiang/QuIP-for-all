@@ -78,6 +78,9 @@ class QuantLinear(nn.Module):
 
     def forward(self, input):
         x = input.view(-1, input.shape[-1])
+        x_dtype = x.dtype
+        if x_dtype != torch.float16:
+            x = x.half()
         if self.rescale_WH:
             x /= self.scaleWH
         x = x * self.SU
@@ -91,6 +94,8 @@ class QuantLinear(nn.Module):
         out = out * self.SV
         out = out.view(*input.shape[:-1], out.shape[-1])
         out = out + self.bias if self.bias is not None else out
+        if x_dtype != torch.float16:
+            out = out.to(dtype=x_dtype)
         return out
 
     def pack(self, linear, attr):

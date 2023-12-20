@@ -41,7 +41,7 @@ from quantizer import load_quantized_model
 quant_dir = "llama-70b_2bit_quip"
 
 quant_model = load_quantized_model(quant_dir).cuda()
-tokenizer = AutoTokenizer.from_pretrained(model_name)
+tokenizer = AutoTokenizer.from_pretrained(quant_dir)
 
 input_ids = tokenizer.encode("The capital of France is", return_tensors="pt").cuda()
 print(tokenizer.decode(quant_model.generate(input_ids, do_sample=True)[0]))
