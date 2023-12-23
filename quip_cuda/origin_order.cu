@@ -161,36 +161,44 @@ __device__ static inline uint64_t decode8weights(
     const int64_t *__restrict__ codebook_abs
 ) {
 
-    uint32_t bit_shift = (weight_compressed & 1)^1;
-    uint8_t bits_sign = (weight_compressed >> 1) & ((1 << 7) - 1);
-    uint8_t bits_abs = (weight_compressed >> 8) & ((1 << 9) - 1);
+    uint8_t bits_sign = weight_compressed & 0xff;
+    uint8_t parity = __popc(bits_sign) & 1;
+    uint8_t sign_vec = bits_sign ^ parity;
+    uint8_t bits_abs = (weight_compressed >> 8);
+    int64_t packed = codebook_abs[bits_abs];
 
+    uint64_t decoded_sign = sign_vec * 0x8040201008040201ll;
+    decoded_sign &= 0x8080808080808080;
+    decoded_sign >>= 7;
+    decoded_sign *= 255 - 3;
+    packed ^= decoded_sign;
+    packed |= 0x0101010101010101;
+    packed -= parity * 0x0202020202020202;
+
+    return packed;
+}
+
+__device__ static inline uint32_t decode8weights(
+    uint16_t weight_compressed,
+    const int64_t *__restrict__ codebook_abs,
+    int idx
+) {
+    uint8_t bits_sign = weight_compressed & 0xff; //__brev(weight_compressed) >> 24;
+    uint8_t parity = __popc(bits_sign) & 1;
+    uint8_t sign_vec = bits_sign ^ parity; // (parity << 7);
+    uint8_t bits_abs = (weight_compressed >> 8);
     int64_t packed_ = codebook_abs[bits_abs];
-    uint32_t packed[2];
-    memcpy(packed, &packed_, sizeof(packed));
 
-    // TODO: optimize this by redefining the bit pattern
-    uint32_t parity = __popc(packed[0] & 0x04040404) ^ __popc(packed[1]&0x04040404);
-    uint8_t sign_vec = bits_sign | ((__popc(bits_sign) ^ parity) << 7);
-    uint32_t decoded_sign[2];
-    decoded_sign[0] = sign_vec * 0x08040201ll;
-    decoded_sign[1] = sign_vec * 0x80402010ll;
-    decoded_sign[0] &= 0x80808080;
-    decoded_sign[1] &= 0x80808080;
-    decoded_sign[0] >>= 7;
-    decoded_sign[1] >>= 7;
-    decoded_sign[0] *= 255 - 3;
-    decoded_sign[1] *= 255 - 3;
-    packed[0] ^= decoded_sign[0];
-    packed[1] ^= decoded_sign[1];
-    packed[0] |= 0x01010101;
-    packed[1] |= 0x01010101;
-    packed[0] -= bit_shift * 0x02020202;
-    packed[1] -= bit_shift * 0x02020202;
-
-    memcpy(&packed_, packed, sizeof(packed));
-
-    return packed_;
+    uint32_t packed = packed_ >> (idx * 32);
+    uint32_t magic_num = idx == 0 ? 0x08040201ll : 0x80402010ll;
+    uint32_t decoded_sign = sign_vec * magic_num;
+    decoded_sign &= 0x80808080;
+    decoded_sign >>= 7;
+    decoded_sign *= 255 - 3;
+    packed ^= decoded_sign;
+    packed |= 0x01010101;
+    packed -= parity * 0x02020202;
+    return packed;
 };
 
 template <int KTilesPerIteration>
@@ -208,32 +216,28 @@ static __device__ void load(
   auto Bptr = (const uint16_t*) B;
   #pragma unroll
   for (int i = 0; i < KTilesPerIteration; ++i) {
-       // The kernel here is not optimized. Half of the data read
-       // and dequant calculate is wasted.
        const int row = nTile * kNTileSize + laneId / 4;
        const int col = (kTileStart + i) * kKTileSize / 8 + laneId % 4 / 2;
-       uint64_t decoded = decode8weights(Bptr[row * k/8 + col], (const int64_t*)CB);
-       half2 unpacked[2][2];
-       uint64_t lower_half = decoded & 0x00ff00ff00ff00ff;
-       lower_half = (lower_half ^ 0x6480648064806480);
-       memcpy(unpacked[0], &lower_half, sizeof(uint64_t));
-       uint64_t upper_half = (decoded & 0xff00ff00ff00ff00) >> 8;
-       upper_half = (upper_half ^ 0x6480648064806480);
-       memcpy(unpacked[1], &upper_half, sizeof(uint64_t));
+       uint32_t decoded = decode8weights(Bptr[row * k/8 + col], (const int64_t*)CB, laneId & 1);
+       half2 unpacked[2];
+       uint32_t lower_half = decoded & 0x00ff00ff;
+       lower_half = (lower_half ^ 0x64806480);
+       memcpy(unpacked, &lower_half, sizeof(uint32_t));
+       uint32_t upper_half = (decoded & 0xff00ff00) >> 8;
+       upper_half = (upper_half ^ 0x64806480);
+       memcpy(unpacked + 1, &upper_half, sizeof(uint32_t));
 
        const half adjust_ = __float2half_rn(-288.0f);
        const half factor_ = __float2half(0.25f);
        const half2 adjust = __halves2half2(adjust_, adjust_);
        const half2 factor = __halves2half2(factor_, factor_);
-       unpacked[0][0] = __hfma2(unpacked[0][0], factor, adjust);
-       unpacked[0][1] = __hfma2(unpacked[0][1], factor, adjust);
-       unpacked[1][0] = __hfma2(unpacked[1][0], factor, adjust);
-       unpacked[1][1] = __hfma2(unpacked[1][1], factor, adjust);
-
-       *((half*)(b[i].vals)) = unpacked[0][laneId & 1].x;
-       *((half*)(b[i].vals) + 1) = unpacked[1][laneId & 1].x;
-       *((half*)(b[i].vals) + 2) = unpacked[0][laneId & 1].y;
-       *((half*)(b[i].vals) + 3) = unpacked[1][laneId & 1].y;
+       unpacked[0] = __hfma2(unpacked[0], factor, adjust);
+       unpacked[1] = __hfma2(unpacked[1], factor, adjust);
+       *(reinterpret_cast<uint64_t*>(b[i].vals)) = *(reinterpret_cast<uint64_t*>(unpacked));
+       //*((half*)(b[i].vals)) = unpacked[0];
+       //*((half*)(b[i].vals) + 1) = unpacked[0].y;
+       //*((half*)(b[i].vals) + 2) = unpacked[1].x;
+       //*((half*)(b[i].vals) + 3) = unpacked[1].y;
   }
 }
 };
@@ -405,7 +409,7 @@ __launch_bounds__(256) void tinygemm_m16n8k16_chunk_kernel(
   }
 }
 
-at::Tensor d4_mm_cuda(
+at::Tensor d4_mm_origorder(
     const at::Tensor& A,
     const at::Tensor& B,
     const at::Tensor& CB) {
@@ -449,7 +453,7 @@ at::Tensor d4_mm_cuda(
   return C_final;
 }
 
-at::Tensor e8_mm_cuda(
+at::Tensor e8p_mm_origorder(
     const at::Tensor& A,
     const at::Tensor& B,
     const at::Tensor& CB) {
@@ -523,7 +527,6 @@ void decompress_d4_origorder(
   assert(YIs.sizes()[0] == m);
   assert(YIs.sizes()[1] * 4 == n);
   assert(CB.sizes()[0] == 256);
-  assert(CB.sizes()[1] == 4);
 
   const dim3 threads(DECOMPRESS_D4_BLOCK_SIZE);
   const dim3 blocks(m*n/(16*DECOMPRESS_D4_BLOCK_SIZE));
@@ -536,49 +539,39 @@ void decompress_d4_origorder(
 }
 
 #define DECOMPRESS_E8P_BLOCK_SIZE 256
-#define FLIP_MASK 9223512776490647552LLU // (1 << 63) + (1 << 47) + (1 << 31) + (1 << 15)
 
 __global__ void cuda_decompress_e8p_origorder_kernel(
     const int16_t* __restrict__ YIs,	  // m x (n/8)
-    const c10::Half* __restrict__ CB, // 256 x 8
-    const bool* __restrict__ CB_even_flips,
+    const int64_t* __restrict__ CB, // 256 x 8
     c10::Half* __restrict__ Y             // m x n
 ) {
   const long i = threadIdx.x + DECOMPRESS_E8P_BLOCK_SIZE * blockIdx.x;
+  uint16_t yidx = ((uint16_t*)YIs)[i];
+  uint64_t decoded =  BLayout_E8::decode8weights(yidx, CB);
 
-  uint16_t yidx = ((uint16_t*)YIs)[i] - 32768;
-  uint16_t abs_idx = (yidx & 65280) >> 8;
-  uint16_t flips = (yidx & 254) >> 1;
-  flips |= (((__popc(flips) & 1) == CB_even_flips[abs_idx]) << 7);
+  half2 unpacked[2][2];
+  uint64_t lower_half = decoded & 0x00ff00ff00ff00ff;
+  lower_half = (lower_half ^ 0x6480648064806480);
+  memcpy(unpacked[0], &lower_half, sizeof(uint64_t));
+  uint64_t upper_half = (decoded & 0xff00ff00ff00ff00) >> 8;
+  upper_half = (upper_half ^ 0x6480648064806480);
+  memcpy(unpacked[1], &upper_half, sizeof(uint64_t));
 
-  ((uint64_t*)Y)[i*2] = ((uint64_t*)CB)[abs_idx*2];
-  uint64_t l4flips = (uint64_t)(flips >> 4);
-  l4flips |= (l4flips << 34);
-  l4flips |= (l4flips << 17);
-  l4flips = (l4flips << 12);
-  l4flips &= FLIP_MASK;
-  ((uint64_t*)Y)[i*2] |= l4flips;
+  const half adjust_ = __float2half_rn(-288.0f);
+  const half factor_ = __float2half(0.25f);
+  const half2 adjust = __halves2half2(adjust_, adjust_);
+  const half2 factor = __halves2half2(factor_, factor_);
 
-  ((uint64_t*)Y)[i*2 + 1] = ((uint64_t*)CB)[abs_idx*2 + 1];
-  uint64_t r4flips = (uint64_t)(flips & 15);
-  r4flips |= (r4flips << 34);
-  r4flips |= (r4flips << 17);
-  r4flips = (r4flips << 12);
-  r4flips &= FLIP_MASK;
-  ((uint64_t*)Y)[i*2 + 1] |= r4flips;
-
-  __half2 const shift = (yidx & 1 ? __half2half2((c10::Half)0.25) : __half2half2((c10::Half)-0.25));
-# pragma unroll 4
-  for(long k = 0; k < 4; k++){
-    ((__half2*)Y)[i*4 + k] = __hadd2(((__half2*)Y)[i*4 + k], shift);
-  }
+  ((__half2*)Y)[i*4] = __hfma2(unpacked[0][0], factor, adjust); // 01
+  ((__half2*)Y)[i*4+2] = __hfma2(unpacked[0][1], factor, adjust); // 45
+  ((__half2*)Y)[i*4+1] = __hfma2(unpacked[1][0], factor, adjust); // 23
+  ((__half2*)Y)[i*4+3] = __hfma2(unpacked[1][1], factor, adjust); // 67
 }
 
 
 void decompress_e8p_origorder(
     torch::Tensor YIs,      // m x (n/8)
     torch::Tensor CB,       // 256 x 8
-    torch::Tensor CB_even_flips, // 256
     torch::Tensor &Y         // m x n
 ) {
   size_t m = Y.sizes()[0];
@@ -586,22 +579,19 @@ void decompress_e8p_origorder(
 
   assert(YIs.is_contiguous());
   assert(CB.is_contiguous());
-  assert(CB_even_flips.is_contiguous());
   assert(Y.is_contiguous());
 
   assert(YIs.sizes()[0] == m);
   assert(YIs.sizes()[1] * 8 == n);
   assert(CB.sizes()[0] == 256);
-  assert(CB.sizes()[1] == 8);
-  assert(CB_even_flips.sizes()[0] == 256);
 
   const dim3 threads(DECOMPRESS_E8P_BLOCK_SIZE);
   const dim3 blocks(m*n/(8*DECOMPRESS_E8P_BLOCK_SIZE));
   cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
   cuda_decompress_e8p_origorder_kernel<<<blocks, threads, 0, stream>>>(
     YIs.data_ptr<int16_t>(),
-    CB.data_ptr<c10::Half>(),
-    CB_even_flips.data_ptr<bool>(),
+    CB.data_ptr<int64_t>(),
     Y.data_ptr<c10::Half>()
   );
 }
+

@@ -182,8 +182,8 @@ class QuipQuantizer(object):
                 new_layer = QuantLinear(in_features,
                                         out_features,
                                         self.codebook,
-                                        self.rescale_WH,
-                                        bias=(layer.bias is not None))
+                                        bias=(layer.bias is not None),
+                                        weight_dtype=layer.weight.dtype)
                 new_layer.device = device
                 #setattr(module, attr, new_layer.to(device))
                 setattr(module, attr, new_layer)
@@ -237,9 +237,6 @@ class QuipQuantizer(object):
                             module, prev_module_hook=hook)
             # If the model has a device_map, we don't move to model. We have already dispatched the hook that will do the work
             has_device_map = True
-
-        if hasattr(model, "dtype"):
-            self.use_cuda_fp16 = model.dtype == torch.float16
 
         if self.model_seqlen is None:
             self.model_seqlen = get_seqlen(model)
@@ -400,7 +397,6 @@ class QuipQuantizer(object):
                 for name in subset_name_list:
                     logger.info(
                         f"Quantizing {name} in block {i + 1}/{len(blocks)}...")
-                    old_weight = quant_method[name].layer.weight.data.clone()
                     attr = quant_method[name].quant(
                         rescale_WH=self.rescale_WH,
                         sigma_reg=self.sigma_reg,
@@ -553,6 +549,10 @@ def load_quantized_model(
     model = quantizer.convert_model(model)
     model.codebook = quantizer.codebook
 
+    # move model to cpu
+    model = model._apply(lambda t: torch.zeros_like(t, device="cpu")
+                         if t.device == torch.device("meta") else t)
+
     checkpoint_dir = Path(save_folder)
     pt_model_map_json = checkpoint_dir / "pytorch_model.bin.index.json"
     st_model_map_json = checkpoint_dir / "model.safetensors.index.json"
@@ -574,7 +574,6 @@ def load_quantized_model(
     else:
         return None
 
-    checkpoint = {}
     for file in sorted(bin_files):
         if str(file).endswith(".bin"):
             state_dict = torch.load(str(file),
@@ -583,9 +582,7 @@ def load_quantized_model(
                                     weights_only=True)
         else:
             state_dict = load_file(str(file), device="cpu")
-        checkpoint.update(state_dict)
-
-    model.load_state_dict(checkpoint, assign=True, strict=False)
+        model.load_state_dict(state_dict, assign=False, strict=False)
 
     model.is_quantized = True
     model.eval()

@@ -22,30 +22,26 @@ class QuantLinear(nn.Module):
                  in_features,
                  out_features,
                  codebook,
-                 rescale_WH,
-                 bias=True):
+                 bias=True,
+                 weight_dtype=torch.float16):
         super().__init__()
 
         self.in_features = in_features
         self.out_features = out_features
-        self.rescale_WH = rescale_WH
         self.codebook = codebook
-        if self.rescale_WH:
-            self.register_buffer("scaleWH", torch.ones(in_features))
-        else:
-            self.scaleWH = None
+        self.weight_dtype = weight_dtype
 
         had_left, self.K_left, self.q_in_features = get_hadK(in_features)
         had_right, self.K_right, self.q_out_features = get_hadK(out_features)
         if had_left is not None:
             self.register_buffer('had_left',
-                                 had_left.to(torch.float16),
+                                 had_left.to(weight_dtype),
                                  persistent=False)
         else:
             self.had_left = None
         if had_right is not None:
             self.register_buffer('had_right',
-                                 had_right.to(torch.float16),
+                                 had_right.to(weight_dtype),
                                  persistent=False)
         else:
             self.had_right = None
@@ -65,47 +61,44 @@ class QuantLinear(nn.Module):
                             (codebook.codesz * codebook.packsz),
                             dtype=codebook.idx_dtype))
 
-        self.register_buffer("codebook_id", torch.tensor(0))
-        self.register_buffer("SU", torch.ones(in_features, dtype=torch.int8))
-        self.register_buffer("SV", torch.ones(out_features, dtype=torch.int8))
-        self.register_buffer("Wscale", torch.ones((), dtype=torch.float16))
+        self.register_buffer("SU", torch.ones(in_features, dtype=weight_dtype))
+        self.register_buffer("SV", torch.ones(out_features, dtype=weight_dtype))
 
         if bias:
             self.register_buffer(
-                'bias', torch.zeros((out_features), dtype=torch.float16))
+                'bias', torch.zeros((out_features), dtype=weight_dtype))
         else:
             self.bias = None
 
     def forward(self, input):
         x = input.view(-1, input.shape[-1])
         x_dtype = x.dtype
-        if x_dtype != torch.float16:
-            x = x.half()
-        if self.rescale_WH:
-            x /= self.scaleWH
         x = x * self.SU
         x = matmul_hadUt_cuda(x, self.had_left, self.K_left,
                               self.q_in_features)
-
-        out = self.codebook(x, self.Qidxs, self.Wscale)
+        if x_dtype != torch.float16:
+            x = x.to(torch.float16)
+        out = self.codebook(x, self.Qidxs)
+        if x_dtype != torch.float16:
+            out = out.to(dtype=x_dtype)
 
         out = matmul_hadU_cuda(out, self.had_right, self.K_right,
                                self.q_out_features)[..., :self.out_features]
+
         out = out * self.SV
         out = out.view(*input.shape[:-1], out.shape[-1])
         out = out + self.bias if self.bias is not None else out
-        if x_dtype != torch.float16:
-            out = out.to(dtype=x_dtype)
+
         return out
 
     def pack(self, linear, attr):
-        if self.rescale_WH:
-            self.scaleWH = attr["scaleWH"].clone().half()
+        if attr["scaleWH"] is not None:
+            self.SU = (attr["SU"] * attr["scaleWH"] * attr["w_scale"]).to(self.weight_dtype)
+        else:
+            self.SU = (attr["SU"] * attr["w_scale"]).to(self.weight_dtype)
         self.Qidxs = attr["Qidxs"].clone()
-        self.SU = attr["SU"].clone()
-        self.SV = attr["SV"].clone()
-        self.Wscale = attr["w_scale"].clone().half()
+        self.SV = attr["SV"].to(self.weight_dtype)
         self.codebook = None
 
         if linear.bias is not None:
-            self.bias = linear.bias.clone().half()
+            self.bias = linear.bias.clone()

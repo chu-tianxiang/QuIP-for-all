@@ -4,7 +4,7 @@ This is an adaptation of [quip-sharp](https://github.com/Cornell-RelaxML/quip-sh
 
 There're a few changes making it incompatable with the checkpoints provided by quip team.
 * Every linear layer is quantized seperated without fusions like concatenating QKV layers.
-* D4 weights are not permuted. New kernels are implemented to better support batch-size=1.
+* The packing format is slightly different, weights are simply packed as `(outdim, indim / codesz)` shape without complex permuting.
 
 ## Usage
 
@@ -46,3 +46,12 @@ tokenizer = AutoTokenizer.from_pretrained(quant_dir)
 input_ids = tokenizer.encode("The capital of France is", return_tensors="pt").cuda()
 print(tokenizer.decode(quant_model.generate(input_ids, do_sample=True)[0]))
 ```
+
+## Deploy
+Working on the a [custom branch](https://github.com/chu-tianxiang/vllm-gptq/tree/quip_gemv) of vLLM now.
+Unfunately tensor-parallel is not supported because Hadamard transform cannot be done for sharded input. Currently the generation speed is about 86 tokens/s for Llama-7b at batchsize=1 in single A100.
+
+## Todo
+
+* Add HI 4-bit support
+* Fuse the SU/SV factors for better performance.

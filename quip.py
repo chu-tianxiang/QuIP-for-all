@@ -166,11 +166,12 @@ class QUIP:
             w = w.t()
         self.layer.weight.data = w.reshape(self.layer.weight.shape).to(
             self.layer.weight.data.dtype)
+        Qidxs = self.cb.maybe_pack_idxs(Qidxs)
         attr = {
             'Qidxs': Qidxs.to('cpu'),
             'w_scale': w_scale.to('cpu'),
-            'SU': self.SU.clone().to(torch.int8),
-            'SV': self.SV.clone().to(torch.int8),
+            'SU': self.SU.clone(),
+            'SV': self.SV.clone(),
             'scaleWH': self.scaleWH.clone() if self.rescale_WH else None,
         }
         return attr

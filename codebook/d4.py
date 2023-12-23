@@ -132,21 +132,19 @@ class D4_codebook(nn.Module):
         assert X.shape[-1] == self.codesz
         return self._quantize_noscale(X, return_idx=return_idx)
 
-    def by_idxs(self, idxs, **kwargs):
-        return self.grid[idxs.int()]
+    def maybe_pack_idxs(self, idxs):
+        return idxs
 
     def forward(self,
                 input,
-                Qidxs,
-                Wscale):
+                Qidxs):
         if input.shape[0] < 24:
-            output = quiptools_cuda.d4_mm_cuda(input, Qidxs, self.grid)
+            output = quiptools_cuda.d4_mm_origorder(input, Qidxs, self.grid)
         else:
             W_decompressed = torch.zeros(
                 Qidxs.shape[0], Qidxs.shape[1] * _D4_CODESZ,
                 dtype=torch.float16, device=input.device
             )
-            quiptools_cuda.decompress_d4(Qidxs, self.grid, W_decompressed)
+            quiptools_cuda.decompress_d4_origorder(Qidxs, self.grid, W_decompressed)
             output = input @ W_decompressed.t()
-        output *= Wscale
         return output

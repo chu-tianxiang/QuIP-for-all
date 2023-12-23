@@ -80,14 +80,14 @@ def matmul_hadU_cuda(X, hadK, K, n, transpose=False):
         X = torch.nn.functional.pad(X, (0, n - X.shape[-1]))
 
     if K == 1:
-        return fast_hadamard_transform.hadamard_transform(X.contiguous(),
+        return fast_hadamard_transform.hadamard_transform(X,
                                                           scale=1 /
                                                           math.sqrt(n))
 
     if transpose:
         hadK = hadK.T.contiguous()
     input = X.view(-1, K, n // K)
-    input = fast_hadamard_transform.hadamard_transform(input.contiguous(),
+    input = fast_hadamard_transform.hadamard_transform(input,
                                                        scale=1 / math.sqrt(n))
     input = hadK @ input
     return input.reshape(X.shape)
