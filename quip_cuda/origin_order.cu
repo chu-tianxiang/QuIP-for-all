@@ -221,18 +221,16 @@ static __device__ void load(
        uint32_t decoded = decode8weights(Bptr[row * k/8 + col], (const int64_t*)CB, laneId & 1);
        half2 unpacked[2];
        uint32_t lower_half = decoded & 0x00ff00ff;
-       lower_half = (lower_half ^ 0x64806480);
+       lower_half = (lower_half ^ 0x5c805c80);
        memcpy(unpacked, &lower_half, sizeof(uint32_t));
        uint32_t upper_half = (decoded & 0xff00ff00) >> 8;
-       upper_half = (upper_half ^ 0x64806480);
+       upper_half = (upper_half ^ 0x5c805c80);
        memcpy(unpacked + 1, &upper_half, sizeof(uint32_t));
 
        const half adjust_ = __float2half_rn(-288.0f);
-       const half factor_ = __float2half(0.25f);
        const half2 adjust = __halves2half2(adjust_, adjust_);
-       const half2 factor = __halves2half2(factor_, factor_);
-       unpacked[0] = __hfma2(unpacked[0], factor, adjust);
-       unpacked[1] = __hfma2(unpacked[1], factor, adjust);
+       unpacked[0] = __hadd2(unpacked[0], adjust);
+       unpacked[1] = __hadd2(unpacked[1], adjust);
        *(reinterpret_cast<uint64_t*>(b[i].vals)) = *(reinterpret_cast<uint64_t*>(unpacked));
        //*((half*)(b[i].vals)) = unpacked[0];
        //*((half*)(b[i].vals) + 1) = unpacked[0].y;
@@ -551,21 +549,19 @@ __global__ void cuda_decompress_e8p_origorder_kernel(
 
   half2 unpacked[2][2];
   uint64_t lower_half = decoded & 0x00ff00ff00ff00ff;
-  lower_half = (lower_half ^ 0x6480648064806480);
+  lower_half = (lower_half ^ 0x5c805c805c805c80);
   memcpy(unpacked[0], &lower_half, sizeof(uint64_t));
   uint64_t upper_half = (decoded & 0xff00ff00ff00ff00) >> 8;
-  upper_half = (upper_half ^ 0x6480648064806480);
+  upper_half = (upper_half ^ 0x5c805c805c805c80);
   memcpy(unpacked[1], &upper_half, sizeof(uint64_t));
 
   const half adjust_ = __float2half_rn(-288.0f);
-  const half factor_ = __float2half(0.25f);
   const half2 adjust = __halves2half2(adjust_, adjust_);
-  const half2 factor = __halves2half2(factor_, factor_);
 
-  ((__half2*)Y)[i*4] = __hfma2(unpacked[0][0], factor, adjust); // 01
-  ((__half2*)Y)[i*4+2] = __hfma2(unpacked[0][1], factor, adjust); // 45
-  ((__half2*)Y)[i*4+1] = __hfma2(unpacked[1][0], factor, adjust); // 23
-  ((__half2*)Y)[i*4+3] = __hfma2(unpacked[1][1], factor, adjust); // 67
+  ((__half2*)Y)[i*4] = __hadd2(unpacked[0][0], adjust); // 01
+  ((__half2*)Y)[i*4+2] = __hadd2(unpacked[0][1], adjust); // 45
+  ((__half2*)Y)[i*4+1] = __hadd2(unpacked[1][0], adjust); // 23
+  ((__half2*)Y)[i*4+3] = __hadd2(unpacked[1][1], adjust); // 67
 }
 
 
@@ -594,4 +590,3 @@ void decompress_e8p_origorder(
     Y.data_ptr<c10::Half>()
   );
 }
-

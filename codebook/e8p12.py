@@ -18,7 +18,7 @@ The total codebook is all 2^7 flips of these 256 entries (2^15) +- 1/4
 which makes 2^16 entries.
 This corresponds to a subset of E8 + 1/4
 """
-
+import numpy as np
 import torch
 from torch import nn
 
@@ -113,7 +113,7 @@ def get_full_grid(packed_abs_grid):
         abs_code = packed_abs_grid[abs].item()
         for i in range(8):
             ii = shuffle_map[i]
-            synth_codebook[c,i] = ((abs_code >> (8 * ii)) & 255) / 4
+            synth_codebook[c,i] = np.int8((abs_code >> (8 * ii)) & 255) / 4
             if ((signs >> (7 - ii)) & 1):
                 synth_codebook[c,i] *= -1
         if parity:
