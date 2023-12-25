@@ -23,26 +23,28 @@ class QuantLinear(nn.Module):
                  out_features,
                  codebook,
                  bias=True,
+                 use_rand=True,
                  weight_dtype=torch.float16):
         super().__init__()
 
         self.in_features = in_features
         self.out_features = out_features
         self.codebook = codebook
+        self.use_rand = use_rand
         self.weight_dtype = weight_dtype
 
-        had_left, self.K_left, self.q_in_features = get_hadK(in_features)
-        had_right, self.K_right, self.q_out_features = get_hadK(out_features)
+        had_left, self.K_left, self.q_in_features = get_hadK(in_features, use_rand)
+        had_right, self.K_right, self.q_out_features = get_hadK(out_features, use_rand)
         if had_left is not None:
             self.register_buffer('had_left',
                                  had_left.to(weight_dtype),
-                                 persistent=False)
+                                 persistent=use_rand)
         else:
             self.had_left = None
         if had_right is not None:
             self.register_buffer('had_right',
                                  had_right.to(weight_dtype),
-                                 persistent=False)
+                                 persistent=use_rand)
         else:
             self.had_right = None
 
@@ -63,6 +65,7 @@ class QuantLinear(nn.Module):
 
         self.register_buffer("SU", torch.ones(in_features, dtype=weight_dtype))
         self.register_buffer("SV", torch.ones(out_features, dtype=weight_dtype))
+        # self.register_buffer("Wscale", torch.ones((), dtype=torch.float16))
 
         if bias:
             self.register_buffer(
@@ -79,6 +82,7 @@ class QuantLinear(nn.Module):
         if x_dtype != torch.float16:
             x = x.to(torch.float16)
         out = self.codebook(x, self.Qidxs)
+
         if x_dtype != torch.float16:
             out = out.to(dtype=x_dtype)
 
@@ -88,7 +92,6 @@ class QuantLinear(nn.Module):
         out = out * self.SV
         out = out.view(*input.shape[:-1], out.shape[-1])
         out = out + self.bias if self.bias is not None else out
-
         return out
 
     def pack(self, linear, attr):
@@ -99,6 +102,10 @@ class QuantLinear(nn.Module):
         self.Qidxs = attr["Qidxs"].clone()
         self.SV = attr["SV"].to(self.weight_dtype)
         self.codebook = None
+        if attr["left_hadK"] is not None:
+            self.had_left = attr["left_hadK"]
+        if attr["right_hadK"] is not None:
+            self.had_right = attr["right_hadK"]
 
         if linear.bias is not None:
             self.bias = linear.bias.clone()

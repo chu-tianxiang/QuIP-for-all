@@ -184,13 +184,12 @@ __device__ static inline uint32_t decode8weights(
     int idx
 ) {
     uint8_t bits_sign = weight_compressed & 0xff; //__brev(weight_compressed) >> 24;
+    const uint32_t magic_nums[2] = {0x08040201ll, 0x80402010ll};
     uint8_t parity = __popc(bits_sign) & 1;
     uint8_t sign_vec = bits_sign ^ parity; // (parity << 7);
-    uint8_t bits_abs = (weight_compressed >> 8);
-    int64_t packed_ = codebook_abs[bits_abs];
-
-    uint32_t packed = packed_ >> (idx * 32);
-    uint32_t magic_num = idx == 0 ? 0x08040201ll : 0x80402010ll;
+    uint16_t bits_abs = (weight_compressed >> 8);
+    uint32_t packed_ = ((uint32_t*)codebook_abs)[(bits_abs << 1) + idx];
+    uint32_t magic_num = magic_numbers[idx];
     uint32_t decoded_sign = sign_vec * magic_num;
     decoded_sign &= 0x80808080;
     decoded_sign >>= 7;

@@ -13,6 +13,7 @@
 # limitations under the License.
 import math
 
+import scipy
 import torch
 import fast_hadamard_transform
 from safetensors.torch import load_file
@@ -35,21 +36,25 @@ def get_power_of_2(n):
     return k, n
 
 
-def get_hadK(n, transpose=False):
+def get_hadK(n, use_rand=True):
     exp, base = get_power_of_2(n)
+    if base == 1:
+        return None, 1, n
+    if use_rand:
+        rand_mat = torch.tensor(scipy.stats.special_ortho_group.rvs(base)).to(torch.float32)
+        return rand_mat, base, n
+
+    # Use hadamad only and add padding if cannot find one
     pad_n = next_power_of_2(n)
-    # use padding if cannot find hadamad
-    if base == 1 or exp < 2 or str(base * 4) not in had_tensors:
+    if exp < 2 or str(base * 4) not in had_tensors:
         return None, 1, pad_n
-    base_mat = had_tensors[str(base *
-                               4)].T if transpose else had_tensors[str(base *
-                                                                       4)]
+    base_mat = had_tensors[str(base * 4)]/math.sqrt(base * 4)
     return base_mat, base * 4, n
 
 
-def matmul_hadU(X, transpose=False):
+def matmul_hadU(X, hadK, K, padN, transpose=False):
     n = X.shape[-1]
-    hadK, K, padN = get_hadK(n, transpose)
+    #hadK, K, padN = get_hadK(n, transpose, use_rand)
     if padN != n:
         input = torch.nn.functional.pad(X, (0, padN - n)).view(-1, padN, 1)
     else:
@@ -65,14 +70,16 @@ def matmul_hadU(X, transpose=False):
         (input, output) = (output, input)
     del output
     if K > 1:
+        if transpose:
+            hadK = hadK.T
         input = torch.bmm(
             hadK.repeat(len(input), 1, 1).to(input.device).to(input.dtype),
             input)
-    return input.view(*X.shape[:-1], padN) / torch.tensor(padN).sqrt()
+    return input.view(*X.shape[:-1], padN) / torch.tensor(padN / K).sqrt()
 
 
-def matmul_hadUt(X):
-    return matmul_hadU(X, transpose=True)
+def matmul_hadUt(X, hadK, K, padN):
+    return matmul_hadU(X, hadK, K, padN, transpose=True)
 
 
 def matmul_hadU_cuda(X, hadK, K, n, transpose=False):
@@ -81,14 +88,13 @@ def matmul_hadU_cuda(X, hadK, K, n, transpose=False):
 
     if K == 1:
         return fast_hadamard_transform.hadamard_transform(X,
-                                                          scale=1 /
-                                                          math.sqrt(n))
+            scale=1 / math.sqrt(n))
 
     if transpose:
         hadK = hadK.T.contiguous()
     input = X.view(-1, K, n // K)
     input = fast_hadamard_transform.hadamard_transform(input,
-                                                       scale=1 / math.sqrt(n))
+        scale=1 / math.sqrt(n // K))
     input = hadK @ input
     return input.reshape(X.shape)
 

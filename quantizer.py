@@ -56,6 +56,7 @@ class QuipQuantizer(object):
         quip_tune_iters: int = 10,
         sigma_reg: float = 0.01,
         rescale_WH: bool = False,
+        use_rand: bool = True,
         scale_override: float = -1,
         sequential: bool = False,
         block_name_to_quantize: Optional[str] = None,
@@ -64,6 +65,7 @@ class QuipQuantizer(object):
         pad_token_id: Optional[int] = None,
         inference: bool = False,
         cache_on_gpu: bool = False,
+        modules_to_not_convert: Optional[List] = None,
         *args,
         **kwargs,
     ):
@@ -73,6 +75,7 @@ class QuipQuantizer(object):
         self.sigma_reg = sigma_reg
         self.model_seqlen = model_seqlen
         self.rescale_WH = rescale_WH
+        self.use_rand = use_rand
         self.scale_override = scale_override
         self.sequential = sequential
         self.block_name_to_quantize = block_name_to_quantize
@@ -80,6 +83,7 @@ class QuipQuantizer(object):
         self.batch_size = batch_size
         self.pad_token_id = pad_token_id
         self.cache_on_gpu = cache_on_gpu
+        self.modules_to_not_convert = modules_to_not_convert
         self.quant_method = 'QUiP'
 
         if codebook not in ["D4", "E8P12"]:
@@ -96,11 +100,11 @@ class QuipQuantizer(object):
         return {
             "quant_method": "QUiP",
             "rescale_WH": self.rescale_WH,
+            "use_rand": self.use_rand,
             "codebook": self.codebook.id,
             "codesz": self.codebook.codesz,
             "idx_dtype": str(self.codebook.idx_dtype),
-            "lora_rank": 0,
-            "outlier_channel_split": False,
+            "modules_to_not_convert": self.modules_to_not_convert
         }
 
     @classmethod
@@ -129,7 +133,7 @@ class QuipQuantizer(object):
         if self.block_name_to_quantize is None:
             self.block_name_to_quantize = get_block_name_with_pattern(model)
         block_name = self.block_name_to_quantize
-        layers_to_be_replaced = get_layers(model, prefix=block_name)
+        layers_to_be_replaced = get_layers(model, prefix=block_name, skip=self.modules_to_not_convert)
         self._replace_by_quant_layers(model, layers_to_be_replaced)
 
         return model
@@ -183,7 +187,8 @@ class QuipQuantizer(object):
                                         out_features,
                                         self.codebook,
                                         bias=(layer.bias is not None),
-                                        weight_dtype=layer.weight.dtype)
+                                        use_rand=self.use_rand,
+                                        weight_dtype=layer.weight.dtype,)
                 new_layer.device = device
                 #setattr(module, attr, new_layer.to(device))
                 setattr(module, attr, new_layer)
@@ -354,9 +359,10 @@ class QuipQuantizer(object):
             # move block to cuda if needed
             if not has_device_map or get_device(block) == torch.device("cpu"):
                 block = block.to(0)
-            layers = get_layers(block)
+            layers = get_layers(block, skip=self.modules_to_not_convert)
             layers_name_list = [list(layers.keys())]
             logger.info(f"Module to quantize {layers_name_list}")
+            print(f"Module to quantize {layers_name_list}")
             for subset_name_list in tqdm(
                     layers_name_list,
                     leave=False,
@@ -397,11 +403,14 @@ class QuipQuantizer(object):
                 for name in subset_name_list:
                     logger.info(
                         f"Quantizing {name} in block {i + 1}/{len(blocks)}...")
+                    old_weight = quant_method[name].layer.weight.data.clone()
                     attr = quant_method[name].quant(
                         rescale_WH=self.rescale_WH,
                         sigma_reg=self.sigma_reg,
                         quip_tune_iters=self.quip_tune_iters,
-                        scale_override=self.scale_override)
+                        scale_override=self.scale_override,
+                        use_rand=self.use_rand)
+                    logger.info("mse: ", (quant_method[name].layer.weight.data - old_weight).pow(2).mean().sqrt())
                     quantizers[
                         f"{self.block_name_to_quantize}.{i}.{name}"] = attr
                     quant_method[name].free()
@@ -451,7 +460,7 @@ class QuipQuantizer(object):
                 A mapping of the layer name and the data needed to pack the layer
         """
         logger.info("Packing model...")
-        layers = get_layers(model)
+        layers = get_layers(model, skip=self.modules_to_not_convert)
         layers = {n: layers[n].to('cpu') for n in quantizers}
         self._replace_by_quant_layers(model, quantizers)
         qlayers = get_layers(model, [QuantLinear])
