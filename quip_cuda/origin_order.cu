@@ -188,8 +188,8 @@ __device__ static inline uint32_t decode8weights(
     uint8_t parity = __popc(bits_sign) & 1;
     uint8_t sign_vec = bits_sign ^ parity; // (parity << 7);
     uint16_t bits_abs = (weight_compressed >> 8);
-    uint32_t packed_ = ((uint32_t*)codebook_abs)[(bits_abs << 1) + idx];
-    uint32_t magic_num = magic_numbers[idx];
+    uint32_t packed = ((uint32_t*)codebook_abs)[(bits_abs << 1) + idx];
+    uint32_t magic_num = magic_nums[idx];
     uint32_t decoded_sign = sign_vec * magic_num;
     decoded_sign &= 0x80808080;
     decoded_sign >>= 7;
