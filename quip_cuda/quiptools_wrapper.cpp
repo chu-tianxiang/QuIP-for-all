@@ -13,6 +13,10 @@ at::Tensor e8p_mm_origorder(
     const at::Tensor& B,
     const at::Tensor& CB);
 
+at::Tensor hi_mm_origorder(
+    const at::Tensor& A,
+   const at::Tensor& B);
+
 void decompress_d4_origorder(
     torch::Tensor YIs,
     torch::Tensor CB,
@@ -23,6 +27,16 @@ void decompress_e8p_origorder(
     torch::Tensor YIs,
     torch::Tensor CB,
     torch::Tensor &Y
+);
+
+//void decompress_hi_origorder(
+//    torch::Tensor YIs,
+//    torch::Tensor &Y
+//);
+
+void decompress_hi_origorder(
+    torch::Tensor YIs,      // m x (n/8)
+    torch::Tensor Y         // m x n
 );
 
 torch::Tensor decompress_packed_e8p(
@@ -39,8 +53,10 @@ torch::Tensor decode_matvec_e8p(
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("d4_mm_origorder", &d4_mm_origorder, "d4_mm_origorder");
   m.def("e8p_mm_origorder", &e8p_mm_origorder, "e8p_mm_origorder");
+  m.def("hi_mm_origorder", &hi_mm_origorder, "hi_mm_origorder");
   m.def("decompress_d4_origorder", &decompress_d4_origorder, "decompress_d4_origorder");
   m.def("decompress_e8p_origorder", &decompress_e8p_origorder, "decompress_e8p_origorder");
+  m.def("decompress_hi_origorder", &decompress_hi_origorder, "decompress_hi_origorder");
   m.def("decompress_packed_e8p", &decompress_packed_e8p, "decompress_packed_e8p");
   m.def("decode_matvec_e8p", &decode_matvec_e8p, "decode_matvec_e8p");
 }
