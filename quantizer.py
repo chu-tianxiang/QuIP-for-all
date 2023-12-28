@@ -86,8 +86,8 @@ class QuipQuantizer(object):
         self.modules_to_not_convert = modules_to_not_convert
         self.quant_method = 'QUiP'
 
-        if codebook not in ["D4", "E8P12"]:
-            raise ValueError("Invalid codebook, has to be D4 or E8P12")
+        if codebook not in ["D4", "E8P12", "HI"]:
+            raise ValueError("Invalid codebook, has to be D4 or E8P12 or HI")
         self.codebook = codebook_id[codebook](inference=inference)
 
         if not (0 < self.sigma_reg < 1):

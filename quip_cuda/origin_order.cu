@@ -173,19 +173,21 @@ static __device__ void load(
   #pragma unroll
   for (int i = 0; i < KTilesPerIteration; ++i) {
       const int row = nTile * kNTileSize + laneId / 4;
-      const int col = (kTileStart + i) * kKTileSize / 2 + (laneId % 4) / 2;
+      const int col = (kTileStart + i) * kKTileSize / 8 + (laneId % 4) / 2;
       // simply use code - 7.5 instead of reading codebook
       uint32_t code = Bptr[row * k/8 + col];
 
-      const uint32_t c0 = 0x64006400;
-      const half z1_  = __float2half_rn(-1024.0f - 7.5f);
-      half2 z1  = __halves2half2(z1_,  z1_);
+      const uint32_t c0 = 0x64086408;
+      const half y16_ = __float2half_rn(1.0f / 16.0f);
+      const half2 y16 = __halves2half2(y16_, y16_);
+      const half z16_ = __float2half_rn(-1024.0f / 16.0f - 8.0f);
+      const half2 z16 = __halves2half2(z16_, z16_);
 
-      uint32_t qa = code >> ((laneId & 1) << 3);
-      uint32_t q0 = ((qa & 0x000f000f) | c0); // half2(q[ 0], q[ 1])      + 1024
-      uint32_t q1 = (((qa & 0x00f000f0) >> 4) | c0); // half2(q[ 2], q[ 3]) + 1024
-      *(half2*)(b[i].vals) = __hadd2(*((half2*)(&q0)), z1);
-      *(half2*)(b[i].vals+1) = __hadd2(*((half2*)(&q1)), z1);
+      uint32_t qa = code >> ((laneId & 1) * 8);
+      uint32_t q0 = (((qa & 0x000f000f) << 4)| c0);
+      uint32_t q1 = ((qa & 0x00f000f0) | c0);
+      *(half2*)(b[i].vals) = __hfma2(*((half2*)(&q0)), y16, z16);
+      *(half2*)(b[i].vals+1) = __hfma2(*((half2*)(&q1)), y16, z16);
   }
 }
 };
@@ -676,22 +678,25 @@ __global__ void cuda_decompress_hi_origorder_kernel(
     const uint32_t* __restrict__ YIs,	  // m x (n/8)
     c10::Half* __restrict__ Y             // m x n
 ) {
-  /*const long i = threadIdx.x + DECOMPRESS_HI_BLOCK_SIZE * blockIdx.x;
+  const long i = threadIdx.x + DECOMPRESS_HI_BLOCK_SIZE * blockIdx.x;
   uint32_t qa = YIs[i];
 
-  const uint32_t c0 = 0x64006400;
-  const half z1_  = __float2half_rn(-1024.0f - 7.5f);
-  const half2 z1  = __halves2half2(z1_,  z1_);
+  const uint32_t c0 = 0x64086408;
+  const half y16_ = __float2half_rn(1.0f / 16.0f);
+  const half2 y16 = __halves2half2(y16_, y16_);
+  const half z16_ = __float2half_rn(-1024.0f / 16.0f - 8.0f);
+  const half2 z16 = __halves2half2(z16_, z16_);
 
-  uint32_t q0 = ((qa & 0x000f000f) | c0); // half2(q[ 0], q[ 1])      + 1024
-  uint32_t q1 = (((qa & 0x00f000f0) >> 4) | c0); // half2(q[ 2], q[ 3]) + 1024
+
+  uint32_t q0 = (((qa & 0x000f000f) << 4) | c0);
+  uint32_t q1 = ((qa & 0x00f000f0)| c0);
   qa >>= 8;
-  uint32_t q2 = ((qa & 0x000f000f) | c0); // half2(q[ 4], q[ 5])      + 1024
-  uint32_t q3 = (((qa & 0x00f000f0) >> 4) | c0); // half2(q[ 6], q[ 7]) + 1024
-  ((__half2*)Y)[i*4] = __hadd2(*((half2*)q0), z1);
-  ((__half2*)Y)[i*4+1] = __hadd2(*((half2*)q1), z1);
-  ((__half2*)Y)[i*4+2] = __hadd2(*((half2*)q2), z1);
-  ((__half2*)Y)[i*4+3] = __hadd2(*((half2*)q3), z1);*/
+  uint32_t q2 = (((qa & 0x000f000f) << 4) | c0);
+  uint32_t q3 = ((qa & 0x00f000f0) | c0);
+  ((__half2*)Y)[i*4] = __hfma2(*((half2*)(&q0)), y16, z16);
+  ((__half2*)Y)[i*4+1] = __hfma2(*((half2*)(&q1)), y16, z16);
+  ((__half2*)Y)[i*4+2] = __hfma2(*((half2*)(&q2)), y16, z16);
+  ((__half2*)Y)[i*4+3] = __hfma2(*((half2*)(&q3)), y16, z16);
 }
 
 void decompress_hi_origorder(

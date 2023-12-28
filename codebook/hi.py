@@ -62,7 +62,7 @@ class HI4B1C_codebook(nn.Module):
     def forward(self,
                 input,
                 Qidxs):
-        if input.shape[0] < 0:
+        if input.shape[0] < 32:
             output = quiptools_cuda.hi_mm_origorder(input, Qidxs)
         else:
             W_decompressed = torch.zeros(

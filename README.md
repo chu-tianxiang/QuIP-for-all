@@ -53,5 +53,4 @@ Unfunately tensor-parallel is not supported because Hadamard transform cannot be
 
 ## Todo
 
-* Add HI 4-bit support
 * Fuse the SU/SV factors for better performance.
