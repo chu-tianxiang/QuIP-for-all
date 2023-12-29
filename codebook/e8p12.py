@@ -122,8 +122,6 @@ def get_full_grid(packed_abs_grid):
             synth_codebook[c,:] += 0.25
     return synth_codebook, torch.arange(1 << 16)
 
-_E8P_PACKED_ABS_CACHED = get_packed_abs_grid()
-_E8P_GRID, _E8P_GRID_IDX = get_full_grid(_E8P_PACKED_ABS_CACHED)
 
 class E8P12_codebook(nn.Module):
 
@@ -137,7 +135,8 @@ class E8P12_codebook(nn.Module):
         self.pack_out = False
         self.version = 1
 
-        self.register_buffer('grid_packed_abs', _E8P_PACKED_ABS_CACHED)
+        self.register_buffer('grid_packed_abs', get_packed_abs_grid())
+        _E8P_GRID, _ = get_full_grid(self.grid_packed_abs)
 
         if not inference:
             self.register_buffer('grid', _E8P_GRID)
