@@ -65,20 +65,29 @@ class QuantLinear(nn.Module):
 
         self.register_buffer("SU", torch.ones(in_features, dtype=weight_dtype))
         self.register_buffer("SV", torch.ones(out_features, dtype=weight_dtype))
-        # self.register_buffer("Wscale", torch.ones((), dtype=torch.float16))
+        self.register_buffer("Wscale", torch.ones((), dtype=torch.float))
+        self.wscale_float = 1.0
 
         if bias:
             self.register_buffer(
                 'bias', torch.zeros((out_features), dtype=weight_dtype))
         else:
             self.bias = None
+        self._register_load_state_dict_pre_hook(self.load_hook)
+
+    def load_hook(self, state_dict, prefix, *args):
+        if prefix + "SU" not in state_dict:
+            self.SU = None
+        if prefix + "SV" not in state_dict:
+            self.SV = None
 
     def forward(self, input):
         x = input.view(-1, input.shape[-1])
         x_dtype = x.dtype
-        x = x * self.SU
+        if self.SU is not None:
+            x = x * self.SU
         x = matmul_hadUt_cuda(x, self.had_left, self.K_left,
-                              self.q_in_features)
+                              self.q_in_features, self.wscale_float)
         if x_dtype != torch.float16:
             x = x.to(torch.float16)
         out = self.codebook(x, self.Qidxs)
@@ -89,18 +98,27 @@ class QuantLinear(nn.Module):
         out = matmul_hadU_cuda(out, self.had_right, self.K_right,
                                self.q_out_features)[..., :self.out_features]
 
-        out = out * self.SV
+        if self.SV is not None:
+            out = out * self.SV
         out = out.view(*input.shape[:-1], out.shape[-1])
         out = out + self.bias if self.bias is not None else out
         return out
 
     def pack(self, linear, attr):
-        if attr["scaleWH"] is not None:
-            self.SU = (attr["SU"] * attr["scaleWH"] * attr["w_scale"]).to(self.weight_dtype)
+        if attr["scaleWH"] is not None and not attr["merge_su"]:
+            self.SU = (attr["SU"] * attr["scaleWH"]).to(self.weight_dtype)
+        elif attr["scaleWH"] is not None:
+            self.SU = attr["scaleWH"].to(self.weight_dtype)
+        elif not attr["merge_su"]:
+            self.SU = attr["SU"].to(self.weight_dtype)
         else:
-            self.SU = (attr["SU"] * attr["w_scale"]).to(self.weight_dtype)
+            self.SU = None
         self.Qidxs = attr["Qidxs"].clone()
-        self.SV = attr["SV"].to(self.weight_dtype)
+        self.Wscale = attr["w_scale"].to(torch.float32)
+        if not attr["merge_sv"]:
+            self.SV = attr["SV"].to(self.weight_dtype)
+        else:
+            self.SV = None
         self.codebook = None
         if attr["left_hadK"] is not None:
             self.had_left = attr["left_hadK"]
@@ -108,4 +126,7 @@ class QuantLinear(nn.Module):
             self.had_right = attr["right_hadK"]
 
         if linear.bias is not None:
-            self.bias = linear.bias.clone()
+            if attr["merge_sv"]:
+                self.bias = (linear.bias / attr["SV"]).to(self.weight_dtype)
+            else:
+                self.bias = linear.bias.to(self.weight_dtype)

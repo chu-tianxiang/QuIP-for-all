@@ -34,7 +34,8 @@ from safetensors.torch import load_file
 from constants import QUIP_CONFIG
 from data import get_dataset, prepare_dataset
 from utils import (get_block_name_with_pattern, get_device, get_layers,
-                   get_preceding_modules, get_seqlen, recurse_getattr)
+                   get_preceding_modules, get_seqlen, recurse_getattr,
+                   get_layers_for_scaling)
 from quip import QUIP
 from qlinear import QuantLinear
 from codebook import codebook_id
@@ -66,6 +67,7 @@ class QuipQuantizer(object):
         inference: bool = False,
         cache_on_gpu: bool = False,
         modules_to_not_convert: Optional[List] = None,
+        merge_suv: bool = False,
         *args,
         **kwargs,
     ):
@@ -84,6 +86,7 @@ class QuipQuantizer(object):
         self.pad_token_id = pad_token_id
         self.cache_on_gpu = cache_on_gpu
         self.modules_to_not_convert = modules_to_not_convert
+        self.merge_suv = merge_suv
         self.quant_method = 'QUiP'
 
         if codebook not in ["D4", "E8P12", "HI"]:
@@ -104,6 +107,7 @@ class QuipQuantizer(object):
             "codebook": self.codebook.id,
             "codesz": self.codebook.codesz,
             "idx_dtype": str(self.codebook.idx_dtype),
+            "merge_suv": self.merge_suv,
             "modules_to_not_convert": self.modules_to_not_convert
         }
 
@@ -362,7 +366,18 @@ class QuipQuantizer(object):
             layers = get_layers(block, skip=self.modules_to_not_convert)
             layers_name_list = [list(layers.keys())]
             logger.info(f"Module to quantize {layers_name_list}")
-            print(f"Module to quantize {layers_name_list}")
+            if self.merge_suv:
+                scale_list = get_layers_for_scaling(model)
+                for prev_name, current_names in scale_list:
+                    prev_op = recurse_getattr(block, prev_name)
+                    if not hasattr(prev_op, "SV"):
+                        prev_op.register_buffer("SV",
+                            (torch.randn(prev_op.weight.shape[0],
+                                         device=get_device(prev_op)).sign() +1e-5).sign()
+                        )
+                    for current_name in current_names:
+                        current_op = recurse_getattr(block, current_name)
+                        current_op.SU = prev_op.SV.clone()
             for subset_name_list in tqdm(
                     layers_name_list,
                     leave=False,
@@ -471,6 +486,15 @@ class QuipQuantizer(object):
             qlayers[name] = qlayers[name].to("cpu")
             qlayers[name].pack(layers[name], attr)
             qlayers[name].to(layer_device)
+
+        if self.merge_suv:
+            for name, module in model.named_modules():
+                if (isinstance(module, nn.LayerNorm) or "rmsnorm" in str(module.__class__).lower()
+                    ) and hasattr(module, "SV"):
+                    module.weight.div_(module.SV)
+                    if hasattr(module, 'bias') and module.bias is not None:
+                        module.bias.div_(module.SV)
+                    module.SV = None
 
         logger.info("Model packed.")
 
@@ -583,6 +607,7 @@ def load_quantized_model(
     else:
         return None
 
+    full_state_dict = {}
     for file in sorted(bin_files):
         if str(file).endswith(".bin"):
             state_dict = torch.load(str(file),
@@ -591,8 +616,12 @@ def load_quantized_model(
                                     weights_only=True)
         else:
             state_dict = load_file(str(file), device="cpu")
-        model.load_state_dict(state_dict, assign=False, strict=False)
+        full_state_dict.update(state_dict)
 
+    model.load_state_dict(full_state_dict, assign=False, strict=False)
+
+    for layer in get_layers(model, [QuantLinear]).values():
+        layer.wscale_float = layer.Wscale.float().item()
     model.is_quantized = True
     model.eval()
     return model

@@ -50,7 +50,3 @@ print(tokenizer.decode(quant_model.generate(input_ids, do_sample=True)[0]))
 ## Deploy
 Working on the a [custom branch](https://github.com/chu-tianxiang/vllm-gptq/tree/quip_gemv) of vLLM now.
 Unfunately tensor-parallel is not supported because Hadamard transform cannot be done for sharded input. Currently the generation speed is about 86 tokens/s for Llama-7b at batchsize=1 in single A100.
-
-## Todo
-
-* Fuse the SU/SV factors for better performance.

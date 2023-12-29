@@ -12,7 +12,8 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 from logging import getLogger
-from typing import Optional, Union
+from typing import Optional, Union, List
+from collections.abc import Iterable
 import functools
 
 import torch
@@ -25,13 +26,14 @@ logger = getLogger(__name__)
 
 
 def get_layers(module: nn.Module,
-               layers=[Conv1D, nn.Conv2d, nn.Linear],
+               layers: List = [Conv1D, nn.Conv2d, nn.Linear],
                prefix: Optional[str] = None,
+               skip: Optional[List] = None,
                name: str = ""):
     """
     Get all the layers with a specific prefix in the module
     Args:
-        module (`nn.Module`):
+	module (`nn.Module`):
             The module that contains our layers
         layers (`list`, defaults to `[Conv1D, nn.Conv2d, nn.Linear]`):
             Type of the layers that we want to get
@@ -41,21 +43,26 @@ def get_layers(module: nn.Module,
             Used for recursion. Don't modify
 
     Returns:
-        `Dict[str,Union[Conv1D, nn.Conv2d, nn.Linear]]`: Mapping of the name of the layer and the actual layer
+	`Dict[str,Union[Conv1D, nn.Conv2d, nn.Linear]]`: Mapping of the name of the layer and the actual layer
     """
+    if skip is None:
+        skip = []
     for layer in layers:
         if isinstance(module, layer):
+            #print(name, skip)
             if prefix is not None:
-                if name.startswith(prefix):
+                if name.startswith(prefix) and all(pattern not in name for pattern in skip):
                     return {name: module}
             else:
-                return {name: module}
+                if all(pattern not in name for pattern in skip):
+                    return {name: module}
     res = {}
     for name1, child in module.named_children():
         res.update(
             get_layers(child,
                        layers=layers,
                        prefix=prefix,
+                       skip=skip,
                        name=name + "." + name1 if name != "" else name1))
     return res
 
@@ -132,6 +139,46 @@ def recurse_getattr(obj, attr: str):
     """
 
     def _getattr(obj, attr):
+        if isinstance(obj, Iterable):
+            return obj[int(attr)]
         return getattr(obj, attr)
 
     return functools.reduce(_getattr, [obj] + attr.split("."))
+
+
+def get_layers_for_scaling(model):
+    model_name = str(model.__class__).lower()
+    if "llama" in model_name or "mistral" in model_name:
+        layers = [
+            ("input_layernorm", ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]),
+            ("post_attention_layernorm", ["mlp.gate_proj", "mlp.up_proj"]),
+            ("mlp.up_proj", ["mlp.down_proj"]),
+        ]
+        if model.config.num_key_value_heads == model.config.num_attention_heads:
+            layers.append(("self_attn.v_proj", ["self_attn.o_proj"]))
+    elif "qwen" in model_name:
+        layers = [
+            ("ln_1", ["attn.c_attn"]),
+            ("ln_2", ["mlp.w2", "mlp.w1"]),
+            ("mlp.w1", ["mlp.c_proj"]),
+        ]
+    elif "mixtral" in model_name:
+        layers = [
+            ("input_layernorm", ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]),
+        ]
+        for i in range(model.config.num_local_experts):
+            layers.append((f"block_sparse_moe.experts.{i}.w3", [f"block_sparse_moe.experts.{i}.w2"]))
+            layers.append(("post_attention_layernorm", [f"block_sparse_moe.experts.{i}.w3", f"block_sparse_moe.experts.{i}.w1"]))
+        if model.config.num_key_value_heads == model.config.num_attention_heads:
+            layers.append(("self_attn.v_proj", ["self_attn.o_proj"]))
+    elif "yi" in model_name:
+        layers = [
+            ("ln1", ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]),
+            ("ln2", ["mlp.gate_proj", "mlp.up_proj"]),
+            ("mlp.up_proj", ["mlp.down_proj"]),
+        ]
+        if model.config.num_key_value_heads == model.config.num_attention_heads:
+            layers.append(("self_attn.v_proj", ["self_attn.o_proj"]))
+    else:
+        raise ValueError(f"{model_name} not supported for merging SU/SV. Please set merge_suv to False")
+    return layers

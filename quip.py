@@ -20,6 +20,7 @@ import transformers
 from quant import (
     LDLQ,
     LDLQ_buffered,
+    get_hadK,
     matmul_hadU,
     matmul_hadUt,
 )
@@ -84,6 +85,7 @@ class QUIP:
               sigma_reg=0.01,
               scale_override=0,
               use_buffered=True,
+              use_rand=True,
               quip_tune_iters=0):
         self.rescale_WH = rescale_WH
         if not use_fp64:
@@ -114,16 +116,25 @@ class QUIP:
             w *= scaleWH[None, :]
             H /= scaleWH[None, :]
             H /= scaleWH[:, None]
-            self.scaleWH = scaleWH.to(torch.float32).cpu()
 
-        SU = (torch.randn(self.columns, device=self.dev).sign() +
-              1e-5).sign().to(self.H.dtype)
-        SV = (torch.randn(self.rows, device=self.dev).sign() + 1e-5).sign().to(
-            self.H.dtype)
-        H = matmul_hadUt(matmul_hadUt(H * SU).T * SU)
-        w = matmul_hadUt(matmul_hadUt(w.T * SV).T * SU)
-        self.SU = SU.cpu()
-        self.SV = SV.cpu()
+        if hasattr(self.layer, "SU"):
+            merge_su = True
+            SU = self.layer.SU.to(self.H.dtype)
+        else:
+            merge_su = False
+            SU = (torch.randn(self.columns, device=self.dev).sign() +
+                  1e-5).sign().to(self.H.dtype)
+        if hasattr(self.layer, "SV"):
+            merge_sv = True
+            SV = self.layer.SV.to(self.H.dtype)
+        else:
+            merge_sv = False
+            SV = (torch.randn(self.rows, device=self.dev).sign() + 1e-5).sign().to(
+                self.H.dtype)
+        left_hadK, left_K, left_N = get_hadK(self.columns, use_rand=use_rand)
+        right_hadK, right_K, right_N = get_hadK(self.rows, use_rand=use_rand)
+        H = matmul_hadUt(matmul_hadUt(H * SU, left_hadK, left_K, left_N).T * SU, left_hadK, left_K, left_N)
+        w = matmul_hadUt(matmul_hadUt(w.T * SV, right_hadK, right_K, right_N).T * SU, left_hadK, left_K, left_N)
 
         attempts = 0
         while True:
@@ -156,11 +167,10 @@ class QUIP:
                                          buf_cols=128)
         hat_w = hat_w * w_scale
 
-        w = (matmul_hadU((matmul_hadU(hat_w)[..., :self.columns] *
-                          self.SU.to(self.dev)).T)[..., :self.rows] *
-             self.SV.to(self.dev)).T
+        w = (matmul_hadU((matmul_hadU(hat_w, left_hadK, left_K, left_N)[..., :self.columns] *
+                          SU.to(self.dev)).T, right_hadK, right_K, right_N)[..., :self.rows] *
+             SV.to(self.dev)).T
         if self.rescale_WH:
-            scaleWH = self.scaleWH.to(w.device)
             w = w / scaleWH[None, :]
         if isinstance(self.layer, transformers.Conv1D):
             w = w.t()
@@ -168,11 +178,15 @@ class QUIP:
             self.layer.weight.data.dtype)
         Qidxs = self.cb.maybe_pack_idxs(Qidxs)
         attr = {
+            'left_hadK': left_hadK.to('cpu') if use_rand and left_hadK is not None else None,
+            'right_hadK': right_hadK.to('cpu') if use_rand and right_hadK is not None else None,
             'Qidxs': Qidxs.to('cpu'),
             'w_scale': w_scale.to('cpu'),
-            'SU': self.SU.clone(),
-            'SV': self.SV.clone(),
-            'scaleWH': self.scaleWH.clone() if self.rescale_WH else None,
+            'SU': SU.to('cpu'),
+            'SV': SV.to('cpu'),
+            'merge_su': merge_su,
+            'merge_sv': merge_sv,
+            'scaleWH': scaleWH.to('cpu') if self.rescale_WH else None,
         }
         return attr
 
@@ -181,7 +195,6 @@ class QUIP:
             self.inp1 = None
             self.out1 = None
         self.H = None
-        self.scaleWH = None
-        self.SU = None
-        self.SV = None
+        self.layer.SU = None
+        self.layer.SV = None
         torch.cuda.empty_cache()
