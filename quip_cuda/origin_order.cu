@@ -468,6 +468,7 @@ at::Tensor d4_mm_origorder(
   auto kTiles = divUp(k, kKTileSize);
 
   // Output is a standard row-major matrix
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(A));
   auto C_final = at::empty(
       {m, n}, at::TensorOptions().dtype(A.dtype()).device(A.device()));
 
@@ -512,6 +513,7 @@ at::Tensor e8p_mm_origorder(
   auto kTiles = divUp(k, kKTileSize);
 
   // Output is a standard row-major matrix
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(A));
   auto C_final = at::empty(
       {m, n}, at::TensorOptions().dtype(A.dtype()).device(A.device()));
 
@@ -554,6 +556,7 @@ at::Tensor hi_mm_origorder(
   auto kTiles = divUp(k, kKTileSize);
 
   // Output is a standard row-major matrix
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(A));
   auto C_final = at::empty(
       {m, n}, at::TensorOptions().dtype(A.dtype()).device(A.device()));
 
@@ -607,6 +610,7 @@ void decompress_d4_origorder(
   assert(YIs.sizes()[1] * 4 == n);
   assert(CB.sizes()[0] == 256);
 
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(Y));
   const dim3 threads(DECOMPRESS_D4_BLOCK_SIZE);
   const dim3 blocks(m*n/(16*DECOMPRESS_D4_BLOCK_SIZE));
   cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
@@ -662,6 +666,7 @@ void decompress_e8p_origorder(
   assert(YIs.sizes()[1] * 8 == n);
   assert(CB.sizes()[0] == 256);
 
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(Y));
   const dim3 threads(DECOMPRESS_E8P_BLOCK_SIZE);
   const dim3 blocks(m*n/(8*DECOMPRESS_E8P_BLOCK_SIZE));
   cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
@@ -712,6 +717,7 @@ void decompress_hi_origorder(
   assert(YIs.sizes()[0] == m);
   assert(YIs.sizes()[1] * 8 == n);
 
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(Y));
   const dim3 threads(DECOMPRESS_HI_BLOCK_SIZE);
   const dim3 blocks(m*n/(8*DECOMPRESS_HI_BLOCK_SIZE));
   cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
