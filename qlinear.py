@@ -24,6 +24,7 @@ class QuantLinear(nn.Module):
                  codebook,
                  bias=True,
                  use_rand=True,
+                 per_channel=False,
                  weight_dtype=torch.float16):
         super().__init__()
 
@@ -31,6 +32,7 @@ class QuantLinear(nn.Module):
         self.out_features = out_features
         self.codebook = codebook
         self.use_rand = use_rand
+        self.per_channel = per_channel
         self.weight_dtype = weight_dtype
 
         had_left, self.K_left, self.q_in_features = get_hadK(in_features, use_rand)
@@ -65,7 +67,10 @@ class QuantLinear(nn.Module):
 
         self.register_buffer("SU", torch.ones(in_features, dtype=weight_dtype))
         self.register_buffer("SV", torch.ones(out_features, dtype=weight_dtype))
-        self.register_buffer("Wscale", torch.ones((), dtype=torch.float))
+        if self.per_channel:
+            self.register_buffer("Wscale", torch.ones((self.q_out_features), dtype=weight_dtype))
+        else:
+            self.register_buffer("Wscale", torch.ones((), dtype=torch.float))
         self.wscale_float = 1.0
 
         if bias:
@@ -91,10 +96,11 @@ class QuantLinear(nn.Module):
         if x_dtype != torch.float16:
             x = x.to(torch.float16)
         out = self.codebook(x, self.Qidxs)
-
         if x_dtype != torch.float16:
             out = out.to(dtype=x_dtype)
 
+        if self.per_channel:
+            out = out * self.Wscale
         out = matmul_hadU_cuda(out, self.had_right, self.K_right,
                                self.q_out_features)[..., :self.out_features]
 
@@ -114,7 +120,10 @@ class QuantLinear(nn.Module):
         else:
             self.SU = None
         self.Qidxs = attr["Qidxs"].clone()
-        self.Wscale = attr["w_scale"].to(torch.float32)
+        if self.per_channel:
+            self.Wscale = attr["w_scale"].squeeze().to(self.weight_dtype)
+        else:
+            self.Wscale = attr["w_scale"].to(torch.float32)
         if not attr["merge_sv"]:
             self.SV = attr["SV"].to(self.weight_dtype)
         else:

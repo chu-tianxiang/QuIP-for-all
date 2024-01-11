@@ -168,7 +168,7 @@ def get_layers_for_scaling(model):
         ]
         for i in range(model.config.num_local_experts):
             layers.append((f"block_sparse_moe.experts.{i}.w3", [f"block_sparse_moe.experts.{i}.w2"]))
-            layers.append(("post_attention_layernorm", [f"block_sparse_moe.experts.{i}.w3", f"block_sparse_moe.experts.{i}.w1"]))
+            # layers.append(("post_attention_layernorm", [f"block_sparse_moe.experts.{i}.w3", f"block_sparse_moe.experts.{i}.w1"]))
         if model.config.num_key_value_heads == model.config.num_attention_heads:
             layers.append(("self_attn.v_proj", ["self_attn.o_proj"]))
     elif "yi" in model_name:

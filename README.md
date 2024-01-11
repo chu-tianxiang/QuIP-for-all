@@ -47,6 +47,16 @@ input_ids = tokenizer.encode("The capital of France is", return_tensors="pt").cu
 print(tokenizer.decode(quant_model.generate(input_ids, do_sample=True)[0]))
 ```
 
-## Deploy
+## Speedup
+
+### GPT-Fast
+In the `gpt-fast` folder I include simply codes to use `torch.compile` for speedup. The code are adapted from [GPT-Fast](https://github.com/pytorch-labs/gpt-fast). Currently only Llama and Qwen are supported.
+
+Testes at A100:
+* Qwen-72B: 14 tokens/s
+* Llama-7b: 93 tokens/s
+
+### vLLM
+
 Working on the a [custom branch](https://github.com/chu-tianxiang/vllm-gptq/tree/quip_gemv) of vLLM now.
 Unfunately tensor-parallel is not supported because Hadamard transform cannot be done for sharded input. Currently the generation speed is about 86 tokens/s for Llama-7b at batchsize=1 in single A100.

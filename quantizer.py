@@ -60,6 +60,7 @@ class QuipQuantizer(object):
         use_rand: bool = True,
         scale_override: float = -1,
         sequential: bool = False,
+        per_channel: bool = False,
         block_name_to_quantize: Optional[str] = None,
         module_name_preceding_first_block: Optional[List[str]] = None,
         batch_size: int = 1,
@@ -80,6 +81,7 @@ class QuipQuantizer(object):
         self.use_rand = use_rand
         self.scale_override = scale_override
         self.sequential = sequential
+        self.per_channel = per_channel
         self.block_name_to_quantize = block_name_to_quantize
         self.module_name_preceding_first_block = module_name_preceding_first_block
         self.batch_size = batch_size
@@ -108,6 +110,7 @@ class QuipQuantizer(object):
             "codesz": self.codebook.codesz,
             "idx_dtype": str(self.codebook.idx_dtype),
             "merge_suv": self.merge_suv,
+            "per_channel": self.per_channel,
             "modules_to_not_convert": self.modules_to_not_convert
         }
 
@@ -192,7 +195,8 @@ class QuipQuantizer(object):
                                         self.codebook,
                                         bias=(layer.bias is not None),
                                         use_rand=self.use_rand,
-                                        weight_dtype=layer.weight.dtype,)
+                                        per_channel=self.per_channel,
+                                        weight_dtype=layer.weight.dtype)
                 new_layer.device = device
                 #setattr(module, attr, new_layer.to(device))
                 setattr(module, attr, new_layer)
@@ -424,7 +428,8 @@ class QuipQuantizer(object):
                         sigma_reg=self.sigma_reg,
                         quip_tune_iters=self.quip_tune_iters,
                         scale_override=self.scale_override,
-                        use_rand=self.use_rand)
+                        use_rand=self.use_rand,
+                        per_channel=self.per_channel)
                     logger.info("mse: ", (quant_method[name].layer.weight.data - old_weight).pow(2).mean().sqrt())
                     quantizers[
                         f"{self.block_name_to_quantize}.{i}.{name}"] = attr
@@ -621,7 +626,10 @@ def load_quantized_model(
     model.load_state_dict(full_state_dict, assign=False, strict=False)
 
     for layer in get_layers(model, [QuantLinear]).values():
-        layer.wscale_float = layer.Wscale.float().item()
+        layer.wscale_float = layer.Wscale.mean().float().item()
+        # prevent overflow
+        if layer.per_channel:
+            layer.Wscale = layer.Wscale / layer.Wscale.mean()
     model.is_quantized = True
     model.eval()
     return model

@@ -86,6 +86,7 @@ class QUIP:
               scale_override=0,
               use_buffered=True,
               use_rand=True,
+              per_channel=False,
               quip_tune_iters=0):
         self.rescale_WH = rescale_WH
         if not use_fp64:
@@ -150,7 +151,10 @@ class QUIP:
                 if attempts == 10:
                     raise ValueError("Hessian is not invertible")
 
-        w_scale = w.square().mean().sqrt()
+        if per_channel:
+            w_scale = w.square().mean(dim=1, keepdim=True).sqrt()
+        else:
+            w_scale = w.square().mean().sqrt()
         if scale_override > 0:
             w_scale /= scale_override
         else:
