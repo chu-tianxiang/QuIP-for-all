@@ -66,7 +66,6 @@ def get_layers(module: nn.Module,
                        name=name + "." + name1 if name != "" else name1))
     return res
 
-
 def get_block_name_with_pattern(model: nn.Module):
     """
     Get the name of the module that contains the transformers blocks by checking if any modules has a specific pattern
@@ -165,10 +164,11 @@ def get_layers_for_scaling(model):
     elif "mixtral" in model_name:
         layers = [
             ("input_layernorm", ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]),
+            ("post_attention_layernorm", ["block_sparse_moe.gate"]),
         ]
         for i in range(model.config.num_local_experts):
             layers.append((f"block_sparse_moe.experts.{i}.w3", [f"block_sparse_moe.experts.{i}.w2"]))
-            # layers.append(("post_attention_layernorm", [f"block_sparse_moe.experts.{i}.w3", f"block_sparse_moe.experts.{i}.w1"]))
+            layers.append(("post_attention_layernorm", [f"block_sparse_moe.experts.{i}.w3", f"block_sparse_moe.experts.{i}.w1"]))
         if model.config.num_key_value_heads == model.config.num_attention_heads:
             layers.append(("self_attn.v_proj", ["self_attn.o_proj"]))
     elif "yi" in model_name:

@@ -78,13 +78,7 @@ class QuantLinear(nn.Module):
                 'bias', torch.zeros((out_features), dtype=weight_dtype))
         else:
             self.bias = None
-        self._register_load_state_dict_pre_hook(self.load_hook)
 
-    def load_hook(self, state_dict, prefix, *args):
-        if prefix + "SU" not in state_dict:
-            self.SU = None
-        if prefix + "SV" not in state_dict:
-            self.SV = None
 
     def forward(self, input):
         x = input.view(-1, input.shape[-1])
@@ -98,7 +92,6 @@ class QuantLinear(nn.Module):
         out = self.codebook(x, self.Qidxs)
         if x_dtype != torch.float16:
             out = out.to(dtype=x_dtype)
-
         if self.per_channel:
             out = out * self.Wscale
         out = matmul_hadU_cuda(out, self.had_right, self.K_right,

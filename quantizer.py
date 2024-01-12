@@ -14,6 +14,7 @@
 # limitations under the License.
 import json
 import os
+import copy
 from pathlib import Path
 from logging import getLogger
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -27,9 +28,11 @@ from accelerate import (
     Accelerator,
     cpu_offload_with_hook,
     init_empty_weights,
+    load_checkpoint_and_dispatch
 )
 from accelerate.hooks import remove_hook_from_module
 from safetensors.torch import load_file
+from huggingface_hub import snapshot_download
 
 from constants import QUIP_CONFIG
 from data import get_dataset, prepare_dataset
@@ -500,6 +503,15 @@ class QuipQuantizer(object):
                     if hasattr(module, 'bias') and module.bias is not None:
                         module.bias.div_(module.SV)
                     module.SV = None
+                if isinstance(module, nn.Linear):
+                    if hasattr(module, "SV"):
+                        module.weight.div_(module.SV.unsqueeze(-1))
+                        if hasattr(module, 'bias') and module.bias is not None:
+                            module.bias.div_(module.SV)
+                        module.SV = None
+                    if hasattr(module, "SU"):
+                        module.weight.div_(module.SU)
+                        module.SU = None
 
         logger.info("Model packed.")
 
@@ -544,11 +556,33 @@ class QuipQuantizer(object):
             json.dump(self.to_dict(), f, indent=2)
 
 
+# Copied from https://github.com/casper-hansen/AutoAWQ/blob/main/awq/models/base.py
+def load_config(model_path, safetensors=True, trust_remote_code=True, revision=None):
+    # [STEP 1] Download model if path is not a directory
+    if not os.path.isdir(model_path):
+        ignore_patterns = ["*msgpack*", "*h5*", "optimizer.pt"]
+        if safetensors:
+            ignore_patterns.extend(["*.pt*", "*.bin*", "consolidated*"])
+        else:
+            ignore_patterns.append("*.safetensors*")
+
+        model_path = snapshot_download(model_path, ignore_patterns=ignore_patterns, revision=revision)
+
+    model_weights_path = model_path
+
+    # [STEP 2] Load config and set sequence length
+    config = AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code, revision=revision)
+
+    return model_weights_path, config
+
+
 def load_quantized_model(
     save_folder: str,
     revision: Optional[str] = None,
     torch_dtype: Optional[Union[str, torch.dtype]] = torch.float16,
     trust_remote_code: bool = True,
+    use_safetensors: bool = False,
+    device_map: Optional[str] = None,
 ):
     """
     Load quantized weights from the save_folder into the converted model and dispatch the weights according to the device_map.
@@ -566,9 +600,10 @@ def load_quantized_model(
         raise RuntimeError(
             "No GPU found. A GPU is needed to run quantized model.")
 
-    config = AutoConfig.from_pretrained(save_folder,
-                                        trust_remote_code=trust_remote_code,
-                                        revision=revision)
+    model_weights_path, config = load_config(save_folder,
+                                             trust_remote_code=trust_remote_code,
+                                             safetensors=use_safetensors,
+                                             revision=revision)
     with init_empty_weights(include_buffers=False):
         model = AutoModelForCausalLM.from_config(
             config,
@@ -578,58 +613,37 @@ def load_quantized_model(
     if hasattr(config, "quantization_config"):
         quantize_config_dict = config.quantization_config
     else:
-        with open(os.path.join(save_folder, QUIP_CONFIG)) as f:
+        with open(os.path.join(model_weights_path, QUIP_CONFIG)) as f:
             quantize_config_dict = json.load(f)
     quantize_config_dict["inference"] = True
     quantizer = QuipQuantizer.from_dict(quantize_config_dict)
     quantizer.codebook = quantizer.codebook.to(torch_dtype)
 
     model = quantizer.convert_model(model)
-    model.codebook = quantizer.codebook
+    # To support device map, we make a copy for each linear layer's codebook
+    for layer in get_layers(model, [QuantLinear]).values():
+        layer.codebook = copy.deepcopy(layer.codebook)
 
-    # move model to cpu
-    model = model._apply(lambda t: torch.zeros_like(t, device="cpu")
-                         if t.device == torch.device("meta") else t)
+    if device_map is None:
+        device_map = {"": "cpu"}
+    load_checkpoint_and_dispatch(
+        model,
+        checkpoint=model_weights_path,
+        device_map=device_map,
+        no_split_module_classes=quantizer.get_no_split_module_classes(model),
+        dtype=torch_dtype,
+    )
 
-    checkpoint_dir = Path(save_folder)
-    pt_model_map_json = checkpoint_dir / "pytorch_model.bin.index.json"
-    st_model_map_json = checkpoint_dir / "model.safetensors.index.json"
-    pt_model = checkpoint_dir / "pytorch_model.bin"
-    st_model = checkpoint_dir / "model.safetensors"
-    if pt_model_map_json.is_file() or st_model_map_json.is_file():
-        model_map_json = pt_model_map_json if pt_model_map_json.is_file(
-        ) else st_model_map_json
-        with open(model_map_json) as json_map:
-            bin_index = json.load(json_map)
-        bin_files = {
-            checkpoint_dir / bin
-            for bin in bin_index["weight_map"].values()
-        }
-    elif pt_model.is_file():
-        bin_files = {pt_model}
-    elif st_model.is_file():
-        bin_files = {st_model}
-    else:
-        return None
-
-    full_state_dict = {}
-    for file in sorted(bin_files):
-        if str(file).endswith(".bin"):
-            state_dict = torch.load(str(file),
-                                    map_location="cpu",
-                                    mmap=True,
-                                    weights_only=True)
-        else:
-            state_dict = load_file(str(file), device="cpu")
-        full_state_dict.update(state_dict)
-
-    model.load_state_dict(full_state_dict, assign=False, strict=False)
-
+    # Trick for better performance
     for layer in get_layers(model, [QuantLinear]).values():
         layer.wscale_float = layer.Wscale.mean().float().item()
-        # prevent overflow
         if layer.per_channel:
             layer.Wscale = layer.Wscale / layer.Wscale.mean()
+        if torch.all(layer.SU > 0):
+            layer.SU = None
+        if torch.all(layer.SV > 0):
+            layer.SV = None
+
     model.is_quantized = True
     model.eval()
     return model
