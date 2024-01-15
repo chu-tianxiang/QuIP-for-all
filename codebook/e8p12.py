@@ -125,7 +125,7 @@ def get_full_grid(packed_abs_grid):
 
 class E8P12_codebook(nn.Module):
 
-    def __init__(self, inference=False):
+    def __init__(self, inference=False, **kwargs):
         super(E8P12_codebook, self).__init__()
         self.id = "E8P12"
         self.opt_scale = 1.03
@@ -136,9 +136,9 @@ class E8P12_codebook(nn.Module):
         self.version = 1
 
         self.register_buffer('grid_packed_abs', get_packed_abs_grid())
-        _E8P_GRID, _ = get_full_grid(self.grid_packed_abs)
 
         if not inference:
+            _E8P_GRID, _ = get_full_grid(self.grid_packed_abs)
             self.register_buffer('grid', _E8P_GRID)
             self.register_buffer('grid_norm', _E8P_GRID.norm(dim=-1)**2)
 

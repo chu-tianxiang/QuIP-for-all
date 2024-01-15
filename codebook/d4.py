@@ -109,7 +109,7 @@ def build_D4_CB():
 
 class D4_codebook(nn.Module):
 
-    def __init__(self, inference=False):
+    def __init__(self, inference=False, **kwargs):
         super(D4_codebook, self).__init__()
         self.id = "D4"
         self.register_buffer("grid", build_D4_CB())

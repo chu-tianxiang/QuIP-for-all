@@ -103,10 +103,17 @@ def convert_hf_checkpoint(
     assert hf_config.is_file()
     hf_config = json.load(open(hf_config))
     if "quantization_config" in hf_config and hf_config["quantization_config"]["quant_method"].lower() == "quip":
-        if hf_config["quantization_config"]["use_rand"]:
-            model_name = checkpoint_dir / f"model_int2_rand.pth"
+        conf = hf_config["quantization_config"]
+        if conf["codebook"] == "E8P12":
+            bits = 2
+        elif conf["codebook"] == "E8P12RVQ3B":
+            bits = 3
         else:
-            model_name = checkpoint_dir / f"model_int2.pth"
+            bits = 4
+        if conf["use_rand"]:
+            model_name = checkpoint_dir / f"model_int{bits}_rand.pth"
+        else:
+            model_name = checkpoint_dir / f"model_int{bits}.pth"
     else:
         model_name = checkpoint_dir / "model.pth"
     print(f"Saving checkpoint to {model_name}")

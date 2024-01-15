@@ -62,6 +62,7 @@ class QuipQuantizer(object):
         rescale_WH: bool = False,
         use_rand: bool = True,
         scale_override: float = -1,
+        opt_resid_scale: float = -1,
         sequential: bool = False,
         per_channel: bool = False,
         block_name_to_quantize: Optional[str] = None,
@@ -83,6 +84,7 @@ class QuipQuantizer(object):
         self.rescale_WH = rescale_WH
         self.use_rand = use_rand
         self.scale_override = scale_override
+        self.opt_resid_scale = opt_resid_scale
         self.sequential = sequential
         self.per_channel = per_channel
         self.block_name_to_quantize = block_name_to_quantize
@@ -94,9 +96,10 @@ class QuipQuantizer(object):
         self.merge_suv = merge_suv
         self.quant_method = 'QUiP'
 
-        if codebook not in ["D4", "E8P12", "HI"]:
+        if codebook not in ["D4", "E8P12", "HI", "E8P12RVQ3B", "E8P12RVQ4B"]:
             raise ValueError("Invalid codebook, has to be D4 or E8P12 or HI")
-        self.codebook = codebook_id[codebook](inference=inference)
+        self.codebook = codebook_id[codebook](inference=inference,
+                                              opt_resid_scale=opt_resid_scale)
 
         if not (0 < self.sigma_reg < 1):
             raise ValueError("damp_percent must between 0 and 1.")
@@ -114,6 +117,7 @@ class QuipQuantizer(object):
             "idx_dtype": str(self.codebook.idx_dtype),
             "merge_suv": self.merge_suv,
             "per_channel": self.per_channel,
+            "opt_resid_scale": self.opt_resid_scale,
             "modules_to_not_convert": self.modules_to_not_convert
         }
 

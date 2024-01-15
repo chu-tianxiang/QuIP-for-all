@@ -126,11 +126,17 @@ def _load_model(checkpoint_path, device, precision):
     with torch.device('meta'):
         model = Transformer.from_name(checkpoint_path.parent.name)
 
-    if "int2" in str(checkpoint_path):
+    if "int" in str(checkpoint_path):
         print("Using quip quantization!")
         from quantize import WeightOnlyQuipQuantHandler
         use_rand = ("rand" in str(checkpoint_path))
-        simple_quantizer = WeightOnlyQuipQuantHandler(model, use_rand)
+        if "int2" in str(checkpoint_path):
+            codebook = "E8P12"
+        elif "int3" in str(checkpoint_path):
+            codebook = "E8P12RVQ3B"
+        else:
+            codebook = "E8P12RVQ4B"
+        simple_quantizer = WeightOnlyQuipQuantHandler(model, codebook, use_rand)
         model = simple_quantizer.convert_for_runtime()
 
     checkpoint = torch.load(str(checkpoint_path), mmap=True, weights_only=True)

@@ -23,7 +23,7 @@ def get_grid():
 
 class HI4B1C_codebook(nn.Module):
 
-    def __init__(self, inference=False):
+    def __init__(self, inference=False, **kwargs):
         super(HI4B1C_codebook, self).__init__()
         self.id = "HI"
         self.opt_scale = 2.97

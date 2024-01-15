@@ -111,4 +111,40 @@ def get_packed_abs_grid():
         acc = acc | (cba[:,(i+1)] << ((i+1)*8))
     return acc
 
+def get_e81bgrid():
+    intr = torch.arange(-4, 4)
+    hintr = intr + 1 / 2
+
+    gintr = torch.cartesian_prod(*[intr] * 8)
+    ghintr = torch.cartesian_prod(*[hintr] * 8)
+
+    ge8 = torch.concat([gintr, ghintr], dim=0)
+    ge8m2 = (ge8.sum(dim=-1) % 2 == 0)
+    ge8n = ge8.norm(dim=-1)**2 <= 2
+
+    e8 = ge8[torch.where(ge8m2 * ge8n)[0]]
+
+    norm4 = torch.tensor([
+        [2, 0, 0, 0, 0, 0, 0, 0],
+        [0, 2, 0, 0, 0, 0, 0, 0],
+        [0, 0, 2, 0, 0, 0, 0, 0],
+        [0, 0, 0, 2, 0, 0, 0, 0],
+        [0, 0, 0, 0, 2, 0, 0, 0],
+        [0, 0, 0, 0, 0, 2, 0, 0],
+        [0, 0, 0, 0, 0, 0, 2, 0],
+        [0, 0, 0, 0, 0, 0, 0, 2],
+        [-2, 0, 0, 0, 0, 0, 0, 0],
+        [0, -2, 0, 0, 0, 0, 0, 0],
+        [0, 0, -2, 0, 0, 0, 0, 0],
+        [0, 0, 0, -2, 0, 0, 0, 0],
+        [0, 0, 0, 0, -2, 0, 0, 0],
+        [0, 0, 0, 0, 0, -2, 0, 0],
+        [0, 0, 0, 0, 0, 0, -2, 0],
+        #[0, 0, 0, 0, 0, 0, 0, -2],
+    ])
+
+    e8 = torch.concat([e8, norm4], dim=0)
+    return e8.to(torch.float16)
+
 CODEBOOK = get_packed_abs_grid()
+E81B_CODEBOOK = get_e81bgrid()
