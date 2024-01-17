@@ -47,6 +47,16 @@ def get_e81bgrid():
     e8 = torch.concat([e8, norm4], dim=0)
     return e8.to(torch.float16)
 
+def pack_e81b(cba):
+    cba = cba[:, [0, 2, 4, 6, 1, 3, 5, 7]]
+    cba = cba * 2
+    cba = cba.to(torch.int32)
+    cba = cba & 0xf
+    acc = cba[:,0]
+    for i in range(7):
+        acc = acc | (cba[:,(i+1)] << ((i+1)*4))
+    return acc
+
 class E8P12RVQ3B_codebook(nn.Module):
 
     def __init__(self, inference=False, opt_resid_scale=None, **kwargs):
@@ -62,6 +72,7 @@ class E8P12RVQ3B_codebook(nn.Module):
 
         self.register_buffer('grid_packed_abs', get_packed_abs_grid())
         self.register_buffer('e81b_grid', get_e81bgrid())
+        self.register_buffer('e81b_grid_packed', pack_e81b(self.e81b_grid))
 
         if not inference:
             _E8P_GRID, _ = get_full_grid(self.grid_packed_abs)
@@ -86,6 +97,7 @@ class E8P12RVQ3B_codebook(nn.Module):
 
     def maybe_pack_idxs(self, idxs):
         # remove the first 8 bit assuming little end
+        # Todo: better packing for memory access
         idxs_int8 = idxs.view(dtype=torch.int8).view(idxs.shape[0], idxs.shape[1], -1)
         idxs = idxs_int8[..., :3].reshape(idxs.shape[0], -1).view(torch.int32)
         return idxs
@@ -98,7 +110,7 @@ class E8P12RVQ3B_codebook(nn.Module):
                 input,
                 Qidxs,
                 self.grid_packed_abs,
-                self.e81b_grid,
+                self.e81b_grid_packed,
                 self.opt_resid_scale
             )
         else:
@@ -107,8 +119,8 @@ class E8P12RVQ3B_codebook(nn.Module):
                 dtype=torch.float16, device=input.device
             )
             quiptools_cuda.decompress_e8prvq3_origorder(
-                Qidxs, self.grid_packed_abs, self.e81b_grid,
-                self.self.opt_resid_scale, W_decompressed
+                Qidxs, self.grid_packed_abs, self.e81b_grid_packed,
+                W_decompressed, self.opt_resid_scale
             )
             output = input @ W_decompressed.T
         return output

@@ -50,6 +50,17 @@ struct __align__(16) f16x2x2_u32 {
   uint32_t vals[2];
 };
 
+union half2_uint32
+{
+    uint32_t as_uint32;
+    half2 as_half2;
+    __device__ half2_uint32(uint32_t val) : as_uint32(val) {}
+    __device__ half2_uint32(half2 val) : as_half2(val) {}
+    __device__ half2_uint32() {}
+    __device__ half2_uint32& operator=(uint32_t val) {as_uint32=val; return *this;}
+    __device__ half2_uint32& operator=(half2 val) {as_half2=val; return *this;}
+};
+
 struct ALayout_RM {
 template <int KTilesToLoad>
 static __device__ void load(
@@ -136,7 +147,7 @@ template <int KTilesPerIteration>
 static __device__ void load(
     const void* __restrict__ B,
     const uint64_t* __restrict__ CB,
-    const half* __restrict__ CB2,
+    const uint32_t* __restrict__ CB2,
     const float CB2_scale,
     int32_t n,
     int32_t k,
@@ -163,7 +174,7 @@ template <int KTilesPerIteration>
 static __device__ void load(
     const void* __restrict__ B,
     const uint64_t* __restrict__ CB,
-    const half* __restrict__ CB2,
+    const uint32_t* __restrict__ CB2,
     const float CB2_scale,
     int32_t n,
     int32_t k,
@@ -182,10 +193,8 @@ static __device__ void load(
       uint32_t code = Bptr[row * k/8 + col];
 
       const uint32_t c0 = 0x64086408;
-      const half y16_ = __float2half_rn(1.0f / 16.0f);
-      const half2 y16 = __halves2half2(y16_, y16_);
-      const half z16_ = __float2half_rn(-1024.0f / 16.0f - 8.0f);
-      const half2 z16 = __halves2half2(z16_, z16_);
+      const half2 y16 = __float2half2_rn(1.0f / 16.0f);
+      const half2 z16 = __float2half2_rn(-1024.0f / 16.0f - 8.0f);
 
       uint32_t qa = code >> ((laneId & 1) * 8);
       uint32_t q0 = (((qa & 0x000f000f) << 4)| c0);
@@ -247,7 +256,7 @@ template <int KTilesPerIteration>
 static __device__ void load(
     const void* __restrict__ B,
     const uint64_t* __restrict__ CB,
-    const half* __restrict__ CB2,
+    const uint32_t* __restrict__ CB2,
     const float CB2_scale,
     int32_t n,
     int32_t k,
@@ -263,18 +272,13 @@ static __device__ void load(
        const int row = nTile * kNTileSize + laneId / 4;
        const int col = (kTileStart + i) * kKTileSize / 8 + laneId % 4 / 2;
        uint32_t decoded = decode8weights(Bptr[row * k/8 + col], (const int64_t*)CB, laneId & 1);
-       half2 unpacked[2];
-       uint32_t lower_half = decoded & 0x00ff00ff;
-       lower_half = (lower_half ^ 0x5c805c80);
-       memcpy(unpacked, &lower_half, sizeof(uint32_t));
-       uint32_t upper_half = (decoded & 0xff00ff00) >> 8;
-       upper_half = (upper_half ^ 0x5c805c80);
-       memcpy(unpacked + 1, &upper_half, sizeof(uint32_t));
+       half2_uint32 unpacked[2];
+       unpacked[0] = ((decoded & 0x00ff00ff) ^ 0x5c805c80) ;
+       unpacked[1] = (((decoded & 0xff00ff00) >> 8) ^ 0x5c805c80);
 
-       const half adjust_ = __float2half_rn(-288.0f);
-       const half2 adjust = __halves2half2(adjust_, adjust_);
-       unpacked[0] = __hadd2(unpacked[0], adjust);
-       unpacked[1] = __hadd2(unpacked[1], adjust);
+       const half2 adjust = __float2half2_rn(-288.0f);
+       unpacked[0] = __hadd2(unpacked[0].as_half2, adjust);
+       unpacked[1] = __hadd2(unpacked[1].as_half2, adjust);
        *(reinterpret_cast<uint64_t*>(b[i].vals)) = *(reinterpret_cast<uint64_t*>(unpacked));
   }
 }
@@ -287,7 +291,7 @@ template <int KTilesPerIteration>
 static __device__ void load(
     const void* __restrict__ B,
     const uint64_t* __restrict__ CB,
-    const half* __restrict__ CB2,
+    const uint32_t* __restrict__ CB2,
     const float CB2_scale,
     int32_t n,
     int32_t k,
@@ -306,24 +310,25 @@ static __device__ void load(
        const uint8_t remain = ptr[0];
        const uint16_t w = ptr[1] | ((uint16_t)(ptr[2]) << 8);
        uint32_t decoded = BLayout_E8::decode8weights(w, (const int64_t*)CB, laneId & 1);
-       half2 unpacked[2];
-       uint32_t lower_half = decoded & 0x00ff00ff;
-       lower_half = (lower_half ^ 0x5c805c80);
-       memcpy(unpacked, &lower_half, sizeof(uint32_t));
-       uint32_t upper_half = (decoded & 0xff00ff00) >> 8;
-       upper_half = (upper_half ^ 0x5c805c80);
-       memcpy(unpacked + 1, &upper_half, sizeof(uint32_t));
 
-       const half adjust_ = __float2half_rn(-288.0f);
-       const half2 adjust = __halves2half2(adjust_, adjust_);
-       unpacked[0] = __hadd2(unpacked[0], adjust);
-       unpacked[1] = __hadd2(unpacked[1], adjust);
+       half2_uint32 unpacked[2];
+       unpacked[0] = ((decoded & 0x00ff00ff) ^ 0x5c805c80) ;
+       unpacked[1] = (((decoded & 0xff00ff00) >> 8) ^ 0x5c805c80);
+       const half2 adjust = __float2half2_rn(-288.0f);
+       unpacked[0] = __hadd2(unpacked[0].as_half2, adjust);
+       unpacked[1] = __hadd2(unpacked[1].as_half2, adjust);
 
-       half2* cb2 = (half2*)(CB2 + remain * 8 + (laneId & 1) * 4);
+       half2_uint32 unpacked_remain[2];
+       uint32_t cb2 = (CB2[remain] >> ((laneId & 1) * 8));
+       unpacked_remain[0] = ((cb2 & 0x000f000f) ^ 0x60086008);
+       unpacked_remain[1] = (((cb2 >> 4) & 0x000f000f) ^ 0x60086008);
+       const half2 adjust_remain = __float2half2_rn(-516.0f);
+       unpacked_remain[0] = __hadd2(unpacked_remain[0].as_half2, adjust_remain);
+       unpacked_remain[1] = __hadd2(unpacked_remain[1].as_half2, adjust_remain);
 
        half2 scale2 = __float2half2_rn(CB2_scale);
-       unpacked[0] = __hfma2(cb2[0], scale2, unpacked[0]);
-       unpacked[1] = __hfma2(cb2[1], scale2, unpacked[1]);
+       unpacked[0] = __hfma2(scale2, unpacked_remain[0].as_half2, unpacked[0].as_half2);
+       unpacked[1] = __hfma2(scale2, unpacked_remain[1].as_half2, unpacked[1].as_half2);
        *(reinterpret_cast<uint64_t*>(b[i].vals)) = *(reinterpret_cast<uint64_t*>(unpacked));
   }
 }
@@ -336,7 +341,7 @@ template <int KTilesPerIteration>
 static __device__ void load(
     const void* __restrict__ B,
     const uint64_t* __restrict__ CB,
-    const half* __restrict__ CB2,
+    const uint32_t* __restrict__ CB2,
     const float CB2_scale,
     int32_t n,
     int32_t k,
@@ -351,35 +356,28 @@ static __device__ void load(
   for (int i = 0; i < KTilesPerIteration; ++i) {
        const int row = nTile * kNTileSize + laneId / 4;
        const int col = (kTileStart + i) * kKTileSize / 8 + laneId % 4 / 2;
-       const uint16_t w = *((uint16_t*)(Bptr + row * k/8 + col) + 1);
-       uint32_t decoded = BLayout_E8::decode8weights(w, (const int64_t*)CB, laneId & 1);
-       half2 unpacked[2];
-       uint32_t lower_half = decoded & 0x00ff00ff;
-       lower_half = (lower_half ^ 0x5c805c80);
-       memcpy(unpacked, &lower_half, sizeof(uint32_t));
-       uint32_t upper_half = (decoded & 0xff00ff00) >> 8;
-       upper_half = (upper_half ^ 0x5c805c80);
-       memcpy(unpacked + 1, &upper_half, sizeof(uint32_t));
-       const half adjust_ = __float2half_rn(-288.0f);
-       const half2 adjust = __halves2half2(adjust_, adjust_);
-       unpacked[0] = __hadd2(unpacked[0], adjust);
-       unpacked[1] = __hadd2(unpacked[1], adjust);
 
-       const uint16_t remain = *(uint16_t*)(Bptr + row * k/8 + col);
-       decoded = BLayout_E8::decode8weights(remain, (const int64_t*)CB, laneId & 1);
-       half2 unpacked_remain[2];
-       lower_half = decoded & 0x00ff00ff;
-       lower_half = (lower_half ^ 0x5c805c80);
-       memcpy(unpacked_remain, &lower_half, sizeof(uint32_t));
-       upper_half = (decoded & 0xff00ff00) >> 8;
-       upper_half = (upper_half ^ 0x5c805c80);
-       memcpy(unpacked_remain + 1, &upper_half, sizeof(uint32_t));
-       unpacked_remain[0] = __hadd2(unpacked_remain[0], adjust);
-       unpacked_remain[1] = __hadd2(unpacked_remain[1], adjust);
+       const uint32_t wall = Bptr[row * k/8 + col];
+       const uint16_t w = (wall >> 16);
+       uint32_t decoded = BLayout_E8::decode8weights(w, (const int64_t*)CB, laneId & 1);
+       half2_uint32 unpacked[2];
+       unpacked[0] = ((decoded & 0x00ff00ff) ^ 0x5c805c80) ;
+       unpacked[1] = (((decoded & 0xff00ff00) >> 8) ^ 0x5c805c80);
+       const half2 adjust = __float2half2_rn(-288.0f);
+       unpacked[0] = __hadd2(unpacked[0].as_half2, adjust);
+       unpacked[1] = __hadd2(unpacked[1].as_half2, adjust);
+
+       const uint16_t remain = (wall & 0xffff);
+       uint32_t remain_decoded = BLayout_E8::decode8weights(remain, (const int64_t*)CB, laneId & 1);
+       half2_uint32 unpacked_remain[2];
+       unpacked_remain[0] = ((remain_decoded & 0x00ff00ff) ^ 0x5c805c80) ;
+       unpacked_remain[1] = (((remain_decoded & 0xff00ff00) >> 8) ^ 0x5c805c80);
+       unpacked_remain[0] = __hadd2(unpacked_remain[0].as_half2, adjust);
+       unpacked_remain[1] = __hadd2(unpacked_remain[1].as_half2, adjust);
 
        half2 scale2 = __float2half2_rn(CB2_scale);
-       unpacked[0] = __hfma2(scale2, unpacked_remain[0], unpacked[0]);
-       unpacked[1] = __hfma2(scale2, unpacked_remain[1], unpacked[1]);
+       unpacked[0] = __hfma2(scale2, unpacked_remain[0].as_half2, unpacked[0].as_half2);
+       unpacked[1] = __hfma2(scale2, unpacked_remain[1].as_half2, unpacked[1].as_half2);
 
        *(reinterpret_cast<uint64_t*>(b[i].vals)) = *(reinterpret_cast<uint64_t*>(unpacked));
   }
@@ -399,7 +397,7 @@ __launch_bounds__(256) void tinygemm_m16n8k16_chunk_kernel(
     const half* __restrict__ A,
     const void* __restrict__ B,
     const uint64_t* __restrict__ CB,
-    const half* __restrict__ CB2,
+    const uint32_t* __restrict__ CB2,
     const float CB2_scale,
 
     // Output data for the C matrix, stored as per CLayout
@@ -684,7 +682,7 @@ at::Tensor e8prvq3_mm_origorder(
       (const half*)A.data_ptr(),
       (const void*)B.data_ptr(),
       (const uint64_t*)CB.data_ptr(),
-      (const half*)CB2.data_ptr(),
+      (const uint32_t*)CB2.data_ptr(),
       scale,
       (half*)C_final.data_ptr(),
       m,
@@ -845,21 +843,17 @@ __global__ void cuda_decompress_e8p_origorder_kernel(
   uint16_t yidx = ((uint16_t*)YIs)[i];
   uint64_t decoded =  BLayout_E8::decode8weights(yidx, CB);
 
-  half2 unpacked[2][2];
-  uint64_t lower_half = decoded & 0x00ff00ff00ff00ff;
-  lower_half = (lower_half ^ 0x5c805c805c805c80);
-  memcpy(unpacked[0], &lower_half, sizeof(uint64_t));
-  uint64_t upper_half = (decoded & 0xff00ff00ff00ff00) >> 8;
-  upper_half = (upper_half ^ 0x5c805c805c805c80);
-  memcpy(unpacked[1], &upper_half, sizeof(uint64_t));
+  half2 unpacked[4];
+  uint64_t lower_half[2];
+  lower_half[0] = ((decoded & 0x00ff00ff00ff00ff) ^ 0x5c805c805c805c80);
+  lower_half[1] = (((decoded & 0xff00ff00ff00ff00) >> 8) ^ 0x5c805c805c805c80);
+  memcpy(unpacked, &lower_half, sizeof(uint64_t) * 2);
 
-  const half adjust_ = __float2half_rn(-288.0f);
-  const half2 adjust = __halves2half2(adjust_, adjust_);
-
-  ((__half2*)Y)[i*4] = __hadd2(unpacked[0][0], adjust); // 01
-  ((__half2*)Y)[i*4+2] = __hadd2(unpacked[0][1], adjust); // 45
-  ((__half2*)Y)[i*4+1] = __hadd2(unpacked[1][0], adjust); // 23
-  ((__half2*)Y)[i*4+3] = __hadd2(unpacked[1][1], adjust); // 67
+  const half2 adjust = __float2half2_rn(-288.0f);
+  ((__half2*)Y)[i*4] = __hadd2(unpacked[0], adjust); // 01
+  ((__half2*)Y)[i*4+2] = __hadd2(unpacked[1], adjust); // 45
+  ((__half2*)Y)[i*4+1] = __hadd2(unpacked[2], adjust); // 23
+  ((__half2*)Y)[i*4+3] = __hadd2(unpacked[3], adjust); // 67
 }
 
 
@@ -893,7 +887,7 @@ void decompress_e8p_origorder(
 __global__ void cuda_decompress_e8prqv3_origorder_kernel(
     const uint8_t* __restrict__ YIs,
     const int64_t* __restrict__ CB,
-    const half* __restrict__ CB2,
+    const uint32_t* __restrict__ CB2,
     half* __restrict__ Y,
     const float scale
 ) {
@@ -903,24 +897,29 @@ __global__ void cuda_decompress_e8prqv3_origorder_kernel(
   const uint16_t yidx = ptr[1] | ((uint16_t)(ptr[2]) << 8);
   uint64_t decoded =  BLayout_E8::decode8weights(yidx, CB);
 
-  half2 unpacked[2][2];
-  uint64_t lower_half = decoded & 0x00ff00ff00ff00ff;
-  lower_half = (lower_half ^ 0x5c805c805c805c80);
-  memcpy(unpacked[0], &lower_half, sizeof(uint64_t));
-  uint64_t upper_half = (decoded & 0xff00ff00ff00ff00) >> 8;
-  upper_half = (upper_half ^ 0x5c805c805c805c80);
-  memcpy(unpacked[1], &upper_half, sizeof(uint64_t));
+  half2 unpacked[4];
+  uint64_t lower_half[2];
+  lower_half[0] = ((decoded & 0x00ff00ff00ff00ff) ^ 0x5c805c805c805c80);
+  lower_half[1] = (((decoded & 0xff00ff00ff00ff00) >> 8) ^ 0x5c805c805c805c80);
+  memcpy(unpacked, &lower_half, sizeof(uint64_t) * 2);
+  const half2 adjust = __float2half2_rn(-288.0f);
 
-  const half adjust_ = __float2half_rn(-288.0f);
-  const half2 adjust = __halves2half2(adjust_, adjust_);
 
-  half2* cb2 = (half2*)(CB2 + remain * 8);
-  half2 scale2 = __float2half2_rn(scale);
+  half2_uint32 unpacked_remain[4];
+  uint32_t cb2 = CB2[remain];
+  const half2 adjust_remain = __float2half2_rn(-516.0f);
+  #pragma unroll
+  for (int i = 0; i < 4; i++) {
+    unpacked_remain[i] = (((cb2 >> (4 * i)) & 0x000f000f) ^ 0x60086008);
+    unpacked_remain[i] = __hadd2(unpacked_remain[i].as_half2, adjust_remain);
+  }
 
-  ((__half2*)Y)[i*4] = __hfma2(scale2, cb2[0], __hadd2(unpacked[0][0], adjust)); // 01
-  ((__half2*)Y)[i*4+2] = __hfma2(scale2, cb2[2], __hadd2(unpacked[0][1], adjust)); // 45
-  ((__half2*)Y)[i*4+1] = __hfma2(scale2, cb2[1], __hadd2(unpacked[1][0], adjust)); // 23
-  ((__half2*)Y)[i*4+3] = __hfma2(scale2, cb2[3], __hadd2(unpacked[1][1], adjust)); // 67
+  const half2 scale2 = __float2half2_rn(scale);
+
+  ((__half2*)Y)[i*4] = __hfma2(scale2, unpacked_remain[0].as_half2, __hadd2(unpacked[0], adjust)); // 01
+  ((__half2*)Y)[i*4+2] = __hfma2(scale2, unpacked_remain[2].as_half2, __hadd2(unpacked[1], adjust)); // 45
+  ((__half2*)Y)[i*4+1] = __hfma2(scale2, unpacked_remain[1].as_half2, __hadd2(unpacked[2], adjust)); // 23
+  ((__half2*)Y)[i*4+3] = __hfma2(scale2, unpacked_remain[3].as_half2, __hadd2(unpacked[3], adjust)); // 67
 }
 
 
@@ -948,7 +947,7 @@ void decompress_e8prqv3_origorder(
   cuda_decompress_e8prqv3_origorder_kernel<<<blocks, threads, 0, stream>>>(
     (uint8_t*)YIs.data_ptr(),
     (int64_t*)CB.data_ptr(),
-    (half*)CB2.data_ptr(),
+    (uint32_t*)CB2.data_ptr(),
     (half*)Y.data_ptr(),
     scale
   );
@@ -964,46 +963,35 @@ __global__ void cuda_decompress_e8prqv4_origorder_kernel(
   uint16_t yidx = *((uint16_t*)(YIs + i) + 1);
   // dequant main
   uint64_t decoded =  BLayout_E8::decode8weights(yidx, CB);
-  half2 unpacked[2][2];
-  uint64_t lower_half = decoded & 0x00ff00ff00ff00ff;
-  lower_half = (lower_half ^ 0x5c805c805c805c80);
-  memcpy(unpacked[0], &lower_half, sizeof(uint64_t));
-  uint64_t upper_half = (decoded & 0xff00ff00ff00ff00) >> 8;
-  upper_half = (upper_half ^ 0x5c805c805c805c80);
-  memcpy(unpacked[1], &upper_half, sizeof(uint64_t));
-  const half adjust_ = __float2half_rn(-288.0f);
-  const half2 adjust = __halves2half2(adjust_, adjust_);
-  unpacked[0][0] = __hadd2(unpacked[0][0], adjust);
-  unpacked[0][1] = __hadd2(unpacked[0][1], adjust);
-  unpacked[1][0] = __hadd2(unpacked[1][0], adjust);
-  unpacked[1][1] = __hadd2(unpacked[1][1], adjust);
+  half2 unpacked[4];
+  uint64_t lower_half[2];
+  lower_half[0] = ((decoded & 0x00ff00ff00ff00ff) ^ 0x5c805c805c805c80);
+  lower_half[1] = (((decoded & 0xff00ff00ff00ff00) >> 8) ^ 0x5c805c805c805c80);
+  memcpy(unpacked, &lower_half, sizeof(uint64_t) * 2);
+  const half2 adjust = __float2half2_rn(-288.0f);
+  #pragma unroll
+  for (int i = 0; i < 4; i++) unpacked[i] = __hadd2(unpacked[i], adjust);
 
   // dequant remain
   uint16_t remain_idx = *(uint16_t*)(YIs + i);
-  decoded =  BLayout_E8::decode8weights(remain_idx, CB);
-  half2 unpacked_remain[2][2];
-  lower_half = decoded & 0x00ff00ff00ff00ff;
-  lower_half = (lower_half ^ 0x5c805c805c805c80);
-  memcpy(unpacked_remain[0], &lower_half, sizeof(uint64_t));
-  upper_half = (decoded & 0xff00ff00ff00ff00) >> 8;
-  upper_half = (upper_half ^ 0x5c805c805c805c80);
-  memcpy(unpacked_remain[1], &upper_half, sizeof(uint64_t));
-  unpacked_remain[0][0] = __hadd2(unpacked_remain[0][0], adjust);
-  unpacked_remain[0][1] = __hadd2(unpacked_remain[0][1], adjust);
-  unpacked_remain[1][0] = __hadd2(unpacked_remain[1][0], adjust);
-  unpacked_remain[1][1] = __hadd2(unpacked_remain[1][1], adjust);
+  uint64_t remain_decoded =  BLayout_E8::decode8weights(remain_idx, CB);
+  half2 unpacked_remain[4];
+  uint64_t remain_half[2];
+  remain_half[0] = ((remain_decoded & 0x00ff00ff00ff00ff) ^ 0x5c805c805c805c80);
+  remain_half[1] = (((remain_decoded & 0xff00ff00ff00ff00) >> 8) ^ 0x5c805c805c805c80);
+  memcpy(unpacked_remain, &remain_half, sizeof(uint64_t) * 2);
+  #pragma unroll
+  for (int i = 0; i < 4; i++) unpacked_remain[i] = __hadd2(unpacked_remain[i], adjust);
 
   // sum up
   half2 scale2 = __float2half2_rn(scale);
-  unpacked[0][0] = __hfma2(scale2, unpacked_remain[0][0], unpacked[0][0]);
-  unpacked[0][1] = __hfma2(scale2, unpacked_remain[0][1], unpacked[0][1]);
-  unpacked[1][0] = __hfma2(scale2, unpacked_remain[1][0], unpacked[1][0]);
-  unpacked[1][1] = __hfma2(scale2, unpacked_remain[1][1], unpacked[1][1]);
+  #pragma unroll
+  for (int i = 0; i < 4; i++) unpacked[i] = __hfma2(scale2, unpacked_remain[i], unpacked[i]);
 
-  ((__half2*)Y)[i*4] = unpacked[0][0]; // 01
-  ((__half2*)Y)[i*4+2] = unpacked[0][1]; // 45
-  ((__half2*)Y)[i*4+1] = unpacked[1][0]; // 23
-  ((__half2*)Y)[i*4+3] = unpacked[1][1]; // 67
+  ((__half2*)Y)[i*4] = unpacked[0]; // 01
+  ((__half2*)Y)[i*4+2] = unpacked[1]; // 45
+  ((__half2*)Y)[i*4+1] = unpacked[2]; // 23
+  ((__half2*)Y)[i*4+3] = unpacked[3]; // 67
 }
 
 

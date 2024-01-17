@@ -144,7 +144,14 @@ def get_e81bgrid():
     ])
 
     e8 = torch.concat([e8, norm4], dim=0)
-    return e8.to(torch.float16)
+    cba = e8[:, [0, 2, 4, 6, 1, 3, 5, 7]]
+    cba = cba * 2
+    cba = cba.to(torch.int32)
+    cba = cba & 0xf
+    acc = cba[:,0]
+    for i in range(7):
+        acc = acc | (cba[:,(i+1)] << ((i+1)*4))
+    return acc
 
 CODEBOOK = get_packed_abs_grid()
 E81B_CODEBOOK = get_e81bgrid()
