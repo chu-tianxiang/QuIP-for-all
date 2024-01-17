@@ -1,6 +1,6 @@
 # QuIP
 
-This is an adaptation of [quip-sharp](https://github.com/Cornell-RelaxML/quip-sharp) to support a wider range of  model architectures.
+This is an adaptation of [official quip-sharp repo](https://github.com/Cornell-RelaxML/quip-sharp) to support a wider range of  model architectures.
 
 There're a few changes making it incompatable with the checkpoints provided by quip team.
 * Every linear layer is quantized seperated without fusions like concatenating QKV layers.
@@ -13,9 +13,10 @@ Please install the cuda kernel in the `quip_cuda` folder.
 python setup_cuda.py install
 ```
 
-* Quantize
+### Quantize
 
-By default 4096 samples of calibration data will be used as [suggested by the author](https://github.com/Cornell-RelaxML/quip-sharp/issues/13#issuecomment-1848867522), which is very time consuming.
+Please refer to the [author's blog](https://cornell-relaxml.github.io/quip-sharp/) for introduction of quip# algorithm.
+
 
 ```python
 import torch
@@ -33,7 +34,17 @@ quant.save(quant_model, quant_dir)
 tokenizer.save_pretrained(quant_dir)
 ```
 
-* Inference
+Arguments of `QuipQuantizer` includes:
+* codebook: the algorithm for quantization, including `E8P12`(2-bit), `E8P12RVQ3B`(3-bit), `E8P12RVQ4B`(4-bit), `D4`(2-bit), `HI`(4-bit). `D4` and `HI` are relatively inferior to E8P12-based methods.
+* dataset: the data used for calibration, supports `c4`, `ptb`, `wikitext2`.
+* nsamples: number of samples used for calibration, larger is slower. By default 4096 samples of calibration data will be used as [suggested by the author](https://github.com/Cornell-RelaxML/quip-sharp/issues/13#issuecomment-1848867522), which is very time consuming.
+* quip_tune_iters: Greedy update passes of the algorithm, higher is slower but yields slightly better quanlity. Default to 10.
+* use_rand: when the dim is not powers of 2, say `dim = 2^n * base`, use_rand will decompose it into `2^n` Hadamard matrix and `base x base` random orthogonal matrices, instead of decomposing to two Hadamard matrix in the original implementation which is not always feasible. Default to true.
+* modules_to_not_convert: the name of layers not to quantize, useful for MOE models where gate layer is often unquantized.
+* merge_suv: trick to cancel out some vectors to reduce calculation. Only support llama, mixtral and qwen. Default to false.
+
+
+### Inference
 ```python
 from transformers import AutoTokenizer
 from quantizer import load_quantized_model
