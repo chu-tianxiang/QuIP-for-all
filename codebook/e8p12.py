@@ -124,16 +124,16 @@ class E8P12_codebook(nn.Module):
         self.pack_out = False
         self.version = 1
 
-        self.register_buffer('grid_packed_abs', get_packed_abs_grid())
+        self.register_buffer('grid_packed_abs', get_packed_abs_grid(), persistent=False)
 
         if not inference:
             _E8P_GRID, _ = get_full_grid(self.grid_packed_abs)
-            self.register_buffer('grid', _E8P_GRID)
-            self.register_buffer('grid_norm', _E8P_GRID.norm(dim=-1)**2)
+            self.register_buffer('grid', _E8P_GRID, persistent=False)
+            self.register_buffer('grid_norm', _E8P_GRID.norm(dim=-1)**2, persistent=False)
 
     def round(self, X, grid, grid_norm):
         assert X.shape[-1] == self.codesz
-        Xqidx = (2 * X @ grid.T - grid_norm).argmax(-1)
+        Xqidx = (2 * torch.matmul(X, grid.T) - grid_norm).argmax(-1)
         return grid[Xqidx], Xqidx
 
     def quantize(self, X, return_idx=True):
@@ -144,6 +144,16 @@ class E8P12_codebook(nn.Module):
 
     def maybe_pack_idxs(self, idxs):
         return idxs
+
+    def decompress_weight(self, Qidxs):
+        W_decompressed = torch.empty(
+            Qidxs.shape[0], Qidxs.shape[1] * _E8P_CODESZ,
+            dtype=torch.float16, device=Qidxs.device
+        )
+        quiptools_cuda.decompress_e8p_origorder(
+            Qidxs, self.grid_packed_abs, W_decompressed
+        )
+        return W_decompressed
 
     def forward(self,
                 input,
@@ -156,12 +166,6 @@ class E8P12_codebook(nn.Module):
                 self.grid_packed_abs
             )
         else:
-            W_decompressed = torch.empty(
-                Qidxs.shape[0], Qidxs.shape[1] * _E8P_CODESZ,
-                dtype=torch.float16, device=input.device
-            )
-            quiptools_cuda.decompress_e8p_origorder(
-                Qidxs, self.grid_packed_abs, W_decompressed
-            )
+            W_decompressed = self.decompress_weight(Qidxs)
             output = input @ W_decompressed.T
         return output

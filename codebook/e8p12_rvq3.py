@@ -70,19 +70,19 @@ class E8P12RVQ3B_codebook(nn.Module):
         self.version = 0
         self.opt_resid_scale = 1 / 2.04 if opt_resid_scale is None else opt_resid_scale
 
-        self.register_buffer('grid_packed_abs', get_packed_abs_grid())
-        self.register_buffer('e81b_grid', get_e81bgrid())
-        self.register_buffer('e81b_grid_packed', pack_e81b(self.e81b_grid))
+        self.register_buffer('grid_packed_abs', get_packed_abs_grid(), persistent=False)
+        self.register_buffer('e81b_grid', get_e81bgrid(), persistent=False)
+        self.register_buffer('e81b_grid_packed', pack_e81b(self.e81b_grid), persistent=False)
 
         if not inference:
             _E8P_GRID, _ = get_full_grid(self.grid_packed_abs)
-            self.register_buffer('grid', _E8P_GRID)
-            self.register_buffer('grid_norm', self.grid.norm(dim=-1)**2)
-            self.register_buffer('e81b_grid_norm', self.e81b_grid.norm(dim=-1)**2)
+            self.register_buffer('grid', _E8P_GRID, persistent=False)
+            self.register_buffer('grid_norm', self.grid.norm(dim=-1)**2, persistent=False)
+            self.register_buffer('e81b_grid_norm', self.e81b_grid.norm(dim=-1)**2, persistent=False)
 
     def round(self, X, grid, grid_norm):
         assert X.shape[-1] == self.codesz
-        Xqidx = (2 * X @ grid.T - grid_norm).argmax(-1)
+        Xqidx = (2 * torch.matmul(X, grid.T) - grid_norm).argmax(-1)
         return grid[Xqidx], Xqidx
 
     def quantize(self, X, return_idx=True):
@@ -102,6 +102,17 @@ class E8P12RVQ3B_codebook(nn.Module):
         idxs = idxs_int8[..., :3].reshape(idxs.shape[0], -1).view(torch.int32)
         return idxs
 
+    def decompress_weight(self, Qidxs):
+        W_decompressed = torch.empty(
+            Qidxs.shape[0], Qidxs.shape[1] * 32 // 3,
+            dtype=torch.float16, device=Qidxs.device
+        )
+        quiptools_cuda.decompress_e8prvq3_origorder(
+            Qidxs, self.grid_packed_abs, self.e81b_grid_packed,
+            W_decompressed, self.opt_resid_scale
+        )
+        return W_decompressed
+
     def forward(self,
                 input,
                 Qidxs):
@@ -114,13 +125,6 @@ class E8P12RVQ3B_codebook(nn.Module):
                 self.opt_resid_scale
             )
         else:
-            W_decompressed = torch.empty(
-                Qidxs.shape[0], Qidxs.shape[1] * 32 // 3,
-                dtype=torch.float16, device=input.device
-            )
-            quiptools_cuda.decompress_e8prvq3_origorder(
-                Qidxs, self.grid_packed_abs, self.e81b_grid_packed,
-                W_decompressed, self.opt_resid_scale
-            )
+            W_decompressed = self.decompress_weight(Qidxs)
             output = input @ W_decompressed.T
         return output

@@ -15,9 +15,8 @@
 import json
 import os
 import copy
-from pathlib import Path
 from logging import getLogger
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 from torch import nn
@@ -38,7 +37,9 @@ from constants import QUIP_CONFIG
 from data import get_dataset, prepare_dataset
 from utils import (get_block_name_with_pattern, get_device, get_layers,
                    get_preceding_modules, get_seqlen, recurse_getattr,
-                   get_layers_for_scaling)
+                   get_layers_for_scaling, split_block_to_sublayers,
+                   extract_susv_params, get_susv_adam, calculate_mse_loss,
+                   calculate_ce_loss)
 from quip import QUIP
 from qlinear import QuantLinear
 from codebook import codebook_id
@@ -54,7 +55,7 @@ class QuipQuantizer(object):
     def __init__(
         self,
         codebook: str,
-        dataset: Optional[Union[List[str], str]] = None,
+        dataset: str,
         nsamples: int = 4096,
         model_seqlen: int = 2048,
         quip_tune_iters: int = 10,
@@ -63,16 +64,23 @@ class QuipQuantizer(object):
         use_rand: bool = True,
         scale_override: float = -1,
         opt_resid_scale: float = -1,
-        sequential: bool = False,
         per_channel: bool = False,
         block_name_to_quantize: Optional[str] = None,
         module_name_preceding_first_block: Optional[List[str]] = None,
-        batch_size: int = 1,
-        pad_token_id: Optional[int] = None,
+        batch_size: int = 4,
         inference: bool = False,
         cache_on_gpu: bool = False,
         modules_to_not_convert: Optional[List] = None,
         merge_suv: bool = False,
+        ft_lr: float = 5e-5,
+        ft_susv_lr: float = 5e-4,
+        ft_epochs: int = 5,
+        ft_train_mode: bool = True,
+        ft_train_size: int = 384,
+        ft_valid_size: int = 128,
+        ft_update_freq: int = 2,
+        ft_valid_freq: int = 1,
+        ft_early_stop: int = 3,
         *args,
         **kwargs,
     ):
@@ -85,17 +93,30 @@ class QuipQuantizer(object):
         self.use_rand = use_rand
         self.scale_override = scale_override
         self.opt_resid_scale = opt_resid_scale
-        self.sequential = sequential
         self.per_channel = per_channel
         self.block_name_to_quantize = block_name_to_quantize
         self.module_name_preceding_first_block = module_name_preceding_first_block
         self.batch_size = batch_size
-        self.pad_token_id = pad_token_id
         self.cache_on_gpu = cache_on_gpu
         self.modules_to_not_convert = modules_to_not_convert
         self.merge_suv = merge_suv
         self.quant_method = 'QUiP'
+        self.ft_lr = ft_lr
+        self.ft_susv_lr = ft_susv_lr
+        self.ft_epochs = ft_epochs
+        self.ft_train_mode = ft_train_mode
+        self.ft_train_size = ft_train_size
+        self.ft_valid_size = ft_valid_size
+        self.ft_update_freq = ft_update_freq
+        self.ft_valid_freq = ft_valid_freq
+        self.ft_early_stop = ft_early_stop
+        if self.ft_train_mode:
+            self.all_samples = self.nsamples + self.ft_train_size + self.ft_valid_size
+        else:
+            self.all_samples = self.nsamples
 
+        if self.ft_train_mode and self.merge_suv:
+            raise ValueError("finetune mode is incompatible with merge_suv")
         if codebook not in ["D4", "E8P12", "HI", "E8P12RVQ3B", "E8P12RVQ4B"]:
             raise ValueError("Invalid codebook, has to be D4 or E8P12 or HI")
         self.codebook = codebook_id[codebook](inference=inference,
@@ -135,13 +156,15 @@ class QuipQuantizer(object):
         """
         return cls(**config_dict)
 
-    def convert_model(self, model: nn.Module):
+    def convert_model(self, model: nn.Module, train: bool = False):
         """
         Convert the model to a Quip model by getting and replacing the layers.
 
         Args:
             model (`nn.Module`):
                 Model to be converted
+            train (`bool`):
+                Finetune mode or inference mode
 
         """
         if self.block_name_to_quantize is None:
@@ -168,7 +191,8 @@ class QuipQuantizer(object):
     def _replace_by_quant_layers(self,
                                  module: nn.Module,
                                  names: List[str],
-                                 name: str = ""):
+                                 name: str = "",
+                                 train: bool = False):
         """
         Replaces linear layers in `module` by `QuantLinear`
 
@@ -179,6 +203,8 @@ class QuipQuantizer(object):
                 List of names of the module to quantize
             name (`str`, defaults to `""`):
                 To keep track of the name of the current module
+            train (`bool`, defaults to False):
+                Finetune mode or inference mode
         """
         if isinstance(module, QuantLinear):
             return
@@ -197,19 +223,25 @@ class QuipQuantizer(object):
                 elif isinstance(layer, Conv1D):
                     in_features = layer.weight.shape[0]
                     out_features = layer.weight.shape[1]
+                cb = codebook_id[self.codebook.id](
+                    inference=True,
+                    opt_resid_scale=self.opt_resid_scale
+                ).to(device)
                 new_layer = QuantLinear(in_features,
                                         out_features,
-                                        self.codebook,
+                                        cb,
                                         bias=(layer.bias is not None),
                                         use_rand=self.use_rand,
                                         per_channel=self.per_channel,
-                                        weight_dtype=layer.weight.dtype)
+                                        weight_dtype=layer.weight.dtype,
+                                        train=train)
                 new_layer.device = device
                 #setattr(module, attr, new_layer.to(device))
                 setattr(module, attr, new_layer)
         for name1, child in module.named_children():
             self._replace_by_quant_layers(
-                child, names, name + "." + name1 if name != "" else name1)
+                child, names, name + "." + name1 if name != "" else name1,
+                train=train)
 
     @torch.no_grad()
     def quantize_model(self, model: nn.Module, tokenizer: Any):
@@ -273,25 +305,14 @@ class QuipQuantizer(object):
                     with the string that you have passed {tokenizer}. If you have a custom tokenizer, you can pass it as input.
                     For now, we only support quantization for text model. Support for vision, speech and multimodel will come later."""
                 )
-        if self.dataset is None:
-            raise ValueError(
-                "You need to pass `dataset` in order to quantize your model")
-        elif isinstance(self.dataset, str):
-            dataset = get_dataset(self.dataset,
-                                  tokenizer,
-                                  nsamples=self.nsamples,
-                                  seqlen=self.model_seqlen,
-                                  split="train")
-        elif isinstance(self.dataset, list):
-            dataset = [
-                tokenizer(data, return_tensors="pt") for data in self.dataset
-            ]
-        else:
-            raise ValueError(
-                "You need to pass a list of string or a string for `dataset`")
+
+        dataset = get_dataset(self.dataset,
+                              tokenizer,
+                              nsamples=self.all_samples,
+                              seqlen=self.model_seqlen,
+                              split="train")
 
         dataset = prepare_dataset(dataset,
-                                  pad_token_id=self.pad_token_id,
                                   batch_size=self.batch_size)
 
         # Step 2: get the input of the 1st block
@@ -375,7 +396,7 @@ class QuipQuantizer(object):
             if not has_device_map or get_device(block) == torch.device("cpu"):
                 block = block.to(0)
             layers = get_layers(block, skip=self.modules_to_not_convert)
-            layers_name_list = [list(layers.keys())]
+            layers_name_list = list(layers.keys())
             logger.info(f"Module to quantize {layers_name_list}")
             if self.merge_suv:
                 scale_list = get_layers_for_scaling(model)
@@ -389,47 +410,56 @@ class QuipQuantizer(object):
                     for current_name in current_names:
                         current_op = recurse_getattr(block, current_name)
                         current_op.SU = prev_op.SV.clone()
-            for subset_name_list in tqdm(
-                    layers_name_list,
+
+            quant_method = {}
+            handles = []
+            for name in layers_name_list:
+                quant_method[name] = QUIP(layers[name], self.codebook)
+
+                def add_batch(name):
+                    def tmp(_, input, output):
+                        quant_method[name].add_batch(
+                            input[0].data, output.data)
+
+                    return tmp
+
+                # because it adding a hook will replace the old one.
+                handles.append(layers[name].register_forward_hook(
+                    add_batch(name)))
+            # update Hessian for each layer in subset_layers thanks to the hook
+            for j in range(self.nsamples // self.batch_size):
+                layer_input = layer_inputs[j].to(get_device(
+                    block)) if not self.cache_on_gpu else layer_inputs[j]
+                layer_output = block(layer_input,
+                                     **layer_input_kwargs[j])[0]
+                layer_outputs.append(layer_output.cpu(
+                    ) if not self.cache_on_gpu else layer_output)
+            # remove hook
+            for h in handles:
+                h.remove()
+            # add sample for finetune
+            if self.ft_train_mode:
+                for j in range(self.nsamples // self.batch_size, len(dataset)):
+                    layer_input = layer_inputs[j].to(get_device(
+                        block)) if not self.cache_on_gpu else layer_inputs[j]
+                    layer_output = block(layer_input,
+                                         **layer_input_kwargs[j])[0]
+                    layer_outputs.append(layer_output.cpu(
+                        ) if not self.cache_on_gpu else layer_output)
+
+            subset_name_lists = split_block_to_sublayers(layers_name_list)
+            for j, subset_name_list in tqdm(
+                    enumerate(subset_name_lists),
                     leave=False,
                     desc="Quantizing layers inside the block"):
                 subset_layers = {
                     name: layers[name]
                     for name in subset_name_list
                 }
-                quant_method = {}
-                handles = []
-                # add hook for each layer in subset_layers
-                for name in subset_layers:
-                    quant_method[name] = QUIP(subset_layers[name],
-                                              self.codebook)
 
-                    def add_batch(name):
-
-                        def tmp(_, input, output):
-                            quant_method[name].add_batch(
-                                input[0].data, output.data)
-
-                        return tmp
-
-                    # because it adding a hook will replace the old one.
-                    handles.append(subset_layers[name].register_forward_hook(
-                        add_batch(name)))
-                # update Hessian for each layer in subset_layers thanks to the hook
-                for j in range(len(dataset)):
-                    layer_input = layer_inputs[j].to(get_device(
-                        block)) if not self.cache_on_gpu else layer_inputs[j]
-                    layer_output = block(layer_input,
-                                         **layer_input_kwargs[j])[0]
-                    layer_outputs.append(layer_output.cpu(
-                    ) if not self.cache_on_gpu else layer_output)
-                # remove hook
-                for h in handles:
-                    h.remove()
                 for name in subset_name_list:
                     logger.info(
                         f"Quantizing {name} in block {i + 1}/{len(blocks)}...")
-                    old_weight = quant_method[name].layer.weight.data.clone()
                     attr = quant_method[name].quant(
                         rescale_WH=self.rescale_WH,
                         sigma_reg=self.sigma_reg,
@@ -437,70 +467,87 @@ class QuipQuantizer(object):
                         scale_override=self.scale_override,
                         use_rand=self.use_rand,
                         per_channel=self.per_channel)
-                    logger.info("mse: ", (quant_method[name].layer.weight.data - old_weight).pow(2).mean().sqrt())
                     quantizers[
                         f"{self.block_name_to_quantize}.{i}.{name}"] = attr
                     quant_method[name].free()
                 del subset_layers
-            # we get the new output from the partial quantized block
-            if self.sequential:
-                layer_outputs = []
-                for j in range(len(dataset)):
-                    layer_input = layer_inputs[j].to(get_device(
-                        block)) if not self.cache_on_gpu else layer_inputs[j]
-                    layer_output = block(layer_input,
-                                         **layer_input_kwargs[j])[0]
-                    layer_outputs.append(layer_output.cpu(
-                    ) if not self.cache_on_gpu else layer_output)
+                # replace to quant layer for finetune
+                self._replace_by_quant_layers(block, subset_name_list, train=True)
+                for name in subset_name_list:
+                    quant_layer = recurse_getattr(block, name)
+                    quant_layer.pack(layers[name],
+                                     quantizers[f"{self.block_name_to_quantize}.{i}.{name}"])
+                    quant_layer.to(get_device(layers[name]))
+                    quant_layer.calc_weight()
+                if self.ft_train_mode and j < len(subset_name_lists) - 1:
+                    torch.set_grad_enabled(True)
+                    block_fp32 = copy.deepcopy(block).float()
+                    block_fp32.train()
+                    susv_params, params = extract_susv_params(block_fp32)
+                    optim = get_susv_adam(susv_params, params, self.ft_susv_lr, self.ft_lr)
+                    train_size = self.ft_train_size // self.batch_size
+                    valid_size = self.ft_valid_size // self.batch_size
+                    train_dataset = list(zip(
+                        layer_inputs[-train_size-valid_size:-valid_size],
+                        layer_input_kwargs[-train_size-valid_size:-valid_size],
+                        layer_outputs[-train_size-valid_size:-valid_size]))
+                    valid_dataset = list(zip(
+                        layer_inputs[-valid_size:],
+                        layer_input_kwargs[-valid_size:],
+                        layer_outputs[-valid_size:],
+                    ))
+                    best_loss = calculate_mse_loss(block_fp32, valid_dataset)
+                    best_sd = copy.deepcopy(block_fp32.state_dict())
+                    logger.info(f'Block {i + 1} initial loss {best_loss}')
+                    scaler = torch.cuda.amp.GradScaler(enabled=True)
+                    worse_ct = 0
+                    for epoch in range(self.ft_epochs):
+                        for bidx, (layer_input, layer_input_kwarg, target_output
+                                   ) in enumerate(train_dataset):
+                            with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=True):
+                                output = block_fp32(layer_input.to(get_device(block_fp32)),
+                                                    **layer_input_kwarg)[0]
+                                loss = nn.MSELoss()(output, target_output.to(get_device(block_fp32)))
+                            scaler.scale(loss).backward()
+                            if bidx % self.ft_update_freq == self.ft_update_freq - 1 or (
+                                    bidx == len(train_dataset) - 1):
+                                scaler.step(optim)
+                                scaler.update()
+                                optim.zero_grad()
+
+                        if epoch % self.ft_valid_freq == self.ft_valid_freq - 1:
+                            test_loss = calculate_mse_loss(block_fp32, valid_dataset)
+                            if test_loss < best_loss:
+                                logger.info(
+                                    f'Block {i + 1} @ epoch {epoch} new loss {test_loss} old loss {best_loss} BETTER'
+                                )
+                                best_loss = test_loss
+                                best_sd = copy.deepcopy(block_fp32.state_dict())
+                                worse_ct = 0
+                        else:
+                            logger.info(
+                                f'Block {i + 1} @ epoch {epoch} new loss {test_loss} old loss {best_loss} WORSE'
+                            )
+                            worse_ct += 1
+                            if worse_ct >= self.ft_early_stop:
+                                break
+                    block.load_state_dict(best_sd)
+                    del optim, train_dataset, valid_dataset, block_fp32
+                    torch.cuda.empty_cache()
+                    torch.set_grad_enabled(False)
 
             # put back to device
             if not has_device_map:
                 blocks[i] = block.to(device)
-            del layers
-            del layer_inputs
+            del layers, layer_inputs, quant_method
             layer_inputs, layer_outputs = layer_outputs, []
             torch.cuda.empty_cache()
 
-        # Step 4: Pack the model at the end (Replacing the layers)
-        self.pack_model(model=model, quantizers=quantizers)
-
-        model.is_quantized = True
-        if has_config:
-            model.config.use_cache = use_cache
-            model.config.quantization_config = self.to_dict()
-
+        del layer_input_kwargs, quantizers
         torch.cuda.empty_cache()
-        return model
-
-    def pack_model(
-        self,
-        model: nn.Module,
-        quantizers: Dict[str, Tuple],
-    ):
-        """
-        Pack the model by replacing the layers by quantized layers
-
-        Args:
-            model (`nn.Module`):
-                The model to pack
-            quantizers (`Dict[str,Tuple]`):
-                A mapping of the layer name and the data needed to pack the layer
-        """
-        logger.info("Packing model...")
-        layers = get_layers(model, skip=self.modules_to_not_convert)
-        layers = {n: layers[n].to('cpu') for n in quantizers}
-        self._replace_by_quant_layers(model, quantizers)
-        qlayers = get_layers(model, [QuantLinear])
-        for name in qlayers:
-            logger.info(name)
-            attr = quantizers[name]
-            layer_device = qlayers[name].device
-            qlayers[name] = qlayers[name].to("cpu")
-            qlayers[name].pack(layers[name], attr)
-            qlayers[name].to(layer_device)
 
         if self.merge_suv:
-            for name, module in model.named_modules():
+            for _, module in model.named_modules():
                 if (isinstance(module, nn.LayerNorm) or "rmsnorm" in str(module.__class__).lower()
                     ) and hasattr(module, "SV"):
                     module.weight.div_(module.SV)
@@ -517,7 +564,96 @@ class QuipQuantizer(object):
                         module.weight.div_(module.SU)
                         module.SU = None
 
-        logger.info("Model packed.")
+        # end2end finetune
+        if self.ft_train_mode:
+            module_names_after_last_block = get_preceding_modules(
+                model, self.block_name_to_quantize, reverse=True)
+            module = nn.Sequential(*[
+                recurse_getattr(model, name)
+                for name in reversed(module_names_after_last_block)
+            ])
+            if not has_device_map:
+                module = module.to(0)
+            for j in range(len(dataset)):
+                layer_input = layer_inputs[j].to(get_device(
+                    module)) if not self.cache_on_gpu else layer_inputs[j]
+                layer_output = module(layer_input).softmax(dim=-1).float()
+                layer_outputs.append(layer_output.cpu(
+                    ) if not self.cache_on_gpu else layer_output)
+
+            # remove W to reduce memory
+            for layer in get_layers(model, [QuantLinear]).values():
+                del layer.W
+            model = model.float()
+            model.gradient_checkpointing_enable()
+            if not has_device_map:
+                model = model.to(0)
+
+            torch.set_grad_enabled(True)
+            susv_params, params = extract_susv_params(model)
+            optim = get_susv_adam(susv_params, params, self.ft_susv_lr, self.ft_lr)
+            train_size = self.ft_train_size // self.batch_size
+            valid_size = self.ft_valid_size // self.batch_size
+            train_dataset = list(zip(
+                dataset[-train_size - valid_size: -valid_size],
+                layer_outputs[-train_size - valid_size: -valid_size]))
+            valid_dataset = list(zip(
+                dataset[-valid_size:],
+                layer_outputs[-valid_size:],
+            ))
+
+            best_loss = calculate_ce_loss(model, valid_dataset)
+            scaler = torch.cuda.amp.GradScaler(enabled=True)
+
+            best_sd = copy.deepcopy(model.state_dict())
+            logger.info(f'initial loss {best_loss}')
+            worse_ct = 0
+            for epoch in range(self.ft_epochs):
+                for bidx, (layer_input, target_output) in enumerate(train_dataset):
+                    with torch.autocast(device_type='cuda',
+                                        dtype=torch.float16,
+                                        enabled=True):
+                        layer_input = {k : v.to(0) for k, v in layer_input.items()}
+                        output = model(**layer_input)[0]
+                        loss = nn.CrossEntropyLoss()(
+                            output.view(-1, output.shape[-1]),
+                            target_output.to(output.device).view(-1, output.shape[-1]))
+                    scaler.scale(loss).backward()
+                    if bidx % self.ft_update_freq == self.ft_update_freq - 1 or bidx == len(
+                        train_dataset) - 1:
+                        scaler.step(optim)
+                        scaler.update()
+                        optim.zero_grad()
+
+                if epoch % self.ft_valid_freq == (self.ft_valid_freq - 1):
+                    test_loss = calculate_ce_loss(model, valid_dataset)
+                    if test_loss < best_loss:
+                        logger.info(
+                            f'epoch {epoch} new loss {test_loss} old loss {best_loss} BETTER'
+                        )
+                        best_loss = test_loss
+                        best_sd = copy.deepcopy(model.state_dict())
+                        worse_ct = 0
+                    else:
+                        logger.info(
+                             f'epoch {epoch} new loss {test_loss} old loss {best_loss} WORSE'
+                        )
+                        worse_ct += 1
+                        if worse_ct >= self.ft_early_stop:
+                            break
+
+            with torch.no_grad():
+                model.load_state_dict(best_sd)
+            torch.set_grad_enabled(False)
+
+        model.is_quantized = True
+        if has_config:
+            model.config.use_cache = use_cache
+            model.config.quantization_config = self.to_dict()
+
+        torch.cuda.empty_cache()
+        return model
+
 
     def save(self,
              model: nn.Module,
@@ -624,9 +760,6 @@ def load_quantized_model(
     quantizer.codebook = quantizer.codebook.to(torch_dtype)
 
     model = quantizer.convert_model(model)
-    # To support device map, we make a copy for each linear layer's codebook
-    for layer in get_layers(model, [QuantLinear]).values():
-        layer.codebook = copy.deepcopy(layer.codebook)
 
     if device_map is None:
         device_map = {"": "cpu"}
@@ -643,6 +776,7 @@ def load_quantized_model(
         layer.wscale_float = layer.Wscale.mean().float().item()
         if layer.per_channel:
             layer.Wscale = layer.Wscale / layer.Wscale.mean()
+        # when merge_suv is true
         if torch.all(layer.SU > 0):
             layer.SU = None
         if torch.all(layer.SV > 0):

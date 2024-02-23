@@ -23,12 +23,12 @@ class HI4B1C_codebook(nn.Module):
         self.version = 0
 
         if not inference:
-            self.register_buffer('grid', get_grid())
-            self.register_buffer('grid_norm', torch.diag(self.grid @ self.grid.T))
+            self.register_buffer('grid', get_grid(), persistent=False)
+            self.register_buffer('grid_norm', torch.diag(self.grid @ self.grid.T), persistent=False)
 
     def round(self, X, grid, grid_norm):
         assert X.shape[-1] == self.codesz
-        Xqidx = (2 * X @ grid.T - grid_norm).argmax(-1)
+        Xqidx = (2 * torch.matmul(X, grid.T) - grid_norm).argmax(-1)
         return grid[Xqidx], Xqidx
 
     def quantize(self, X, return_idx=True):
@@ -48,16 +48,20 @@ class HI4B1C_codebook(nn.Module):
             (idxs[:, 5::self.packsz] << 4*6) + \
             (idxs[:, 7::self.packsz] << 4*7)
 
+    def decompress_weight(self, Qidxs):
+        W_decompressed = torch.zeros(
+            Qidxs.shape[0], Qidxs.shape[1] * self.packsz,
+            dtype=torch.float16, device=Qidxs.device
+        )
+        quiptools_cuda.decompress_hi_origorder(Qidxs, W_decompressed)
+        return W_decompressed
+
     def forward(self,
                 input,
                 Qidxs):
         if input.shape[0] < 32:
             output = quiptools_cuda.hi_mm_origorder(input, Qidxs)
         else:
-            W_decompressed = torch.zeros(
-                Qidxs.shape[0], Qidxs.shape[1] * self.packsz,
-                dtype=torch.float16, device=input.device
-            )
-            quiptools_cuda.decompress_hi_origorder(Qidxs, W_decompressed)
+            W_decompressed = self.decompress_weight(Qidxs)
             output = input @ W_decompressed.t()
         return output

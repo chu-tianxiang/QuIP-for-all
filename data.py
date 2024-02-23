@@ -25,8 +25,7 @@ Set of utilities for loading most used datasets (original dataset from GPTQ pape
 
 
 def prepare_dataset(examples: List[Dict[str, torch.LongTensor]],
-                    batch_size: int = 1,
-                    pad_token_id: Optional[int] = None):
+                    batch_size: int = 1):
     """
     Prepare the dataset by making sure that we have the right format and `batch_size`
     Args:
@@ -34,8 +33,6 @@ def prepare_dataset(examples: List[Dict[str, torch.LongTensor]],
             List of data to prepare
         batch_size (`int`, defaults to `1`):
             Batch size of the data
-        pad_token_id (`Optional[int]`, defaults to `None`):
-            Pad token id of the model
     Returns:
         ` List[Dict[str, torch.LongTensor]]`: Batched dataset
     """
@@ -47,13 +44,8 @@ def prepare_dataset(examples: List[Dict[str, torch.LongTensor]],
             "input_ids": torch.LongTensor(input_ids),
             "attention_mask": torch.LongTensor(attention_mask)
         })
-    if batch_size > 1 and pad_token_id is None:
-        raise ValueError(
-            "You need to pass a `pad_token_id` in `quantize_model` if you want to have examples with batch size > 1"
-        )
     new_examples = [
-        collate_data(new_examples[start:start + batch_size],
-                     pad_token_id=pad_token_id)
+        collate_data(new_examples[start:start + batch_size])
         for start in range(0, len(new_examples), batch_size)
     ]
     return new_examples
@@ -62,15 +54,12 @@ def prepare_dataset(examples: List[Dict[str, torch.LongTensor]],
 def collate_data(
     blocks: List[Dict[str, torch.LongTensor]],
     contain_labels: bool = False,
-    pad_token_id: Optional[int] = None,
 ) -> Dict[str, torch.LongTensor]:
     """
         Collate data in `blocks`
     Args:
         blocks (`List[Dict[str, torch.LongTensor]]`):
             List of tensors that we need to batch together
-        pad_token_id (`Optional[int]`, defaults to `None`):
-            Pad token id of the model
         contain_labels (`bool`, defaults to `False`):
            Set True to also process the labels
 
@@ -78,34 +67,10 @@ def collate_data(
         `Dict[str, torch.LongTensor]`: Batched data
     """
 
-    def pad_block(block, pads):
-        return torch.cat((pads.to(block.device), block), dim=-1).long()
-
     input_ids_blocks = [block["input_ids"] for block in blocks]
     attention_mask_blocks = [block["attention_mask"] for block in blocks]
     if contain_labels:
         label_blocks = [block["labels"] for block in blocks]
-        label_max_len = max([block.size(-1) for block in label_blocks])
-
-    bsz = len(blocks)
-    inp_max_len = max([block.size(-1) for block in input_ids_blocks])
-
-    for i in range(bsz):
-        block_bsz, block_inp_len = input_ids_blocks[i].shape
-        pad_num = inp_max_len - block_inp_len
-        if pad_num > 0:
-            input_ids_blocks[i] = pad_block(
-                input_ids_blocks[i],
-                torch.ones((block_bsz, pad_num)) * pad_token_id)
-            attention_mask_blocks[i] = pad_block(
-                attention_mask_blocks[i], torch.zeros((block_bsz, pad_num)))
-        if contain_labels:
-            block_label_len = label_blocks[i].shape[-1]
-            label_pad_num = label_max_len - block_label_len
-            if label_pad_num > 0:
-                label_blocks[i] = pad_block(
-                    label_blocks[i],
-                    torch.ones((block_bsz, label_pad_num)) * -100)
 
     data = {
         "input_ids": torch.cat(input_ids_blocks, dim=0).long(),
@@ -247,6 +212,27 @@ def get_ptb_new(tokenizer: Any,
     return dataset
 
 
+def get_redpajama(tokenizer: Any, seqlen: int, nsamples: int, split: str = "train"):
+    assert split == "train"
+    data = load_dataset(
+        "togethercomputer/RedPajama-Data-1T-Sample",
+        split="train")
+
+    dataset = []
+    for _ in range(nsamples):
+        while True:
+            i = random.randint(0, len(data) - 1)
+            enc = tokenizer(data[i]["text"], return_tensors="pt")
+            if enc.input_ids.shape[1] >= seqlen:
+                break
+        i = random.randint(0, enc.input_ids.shape[1] - seqlen)
+        j = i + seqlen
+        inp = enc.input_ids[:, i:j]
+        attention_mask = torch.ones_like(inp)
+        dataset.append({"input_ids": inp, "attention_mask": attention_mask})
+    return dataset
+
+
 def get_dataset(dataset_name: str,
                 tokenizer: Any,
                 nsamples: int = 128,
@@ -281,6 +267,7 @@ def get_dataset(dataset_name: str,
         "c4-new": get_c4_new,
         "ptb": get_ptb,
         "ptb-new": get_ptb_new,
+        "redpajama": get_redpajama,
     }
     if split not in ["train", "validation"]:
         raise ValueError(
