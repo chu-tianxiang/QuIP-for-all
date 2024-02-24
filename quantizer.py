@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import gc
 import json
 import os
 import copy
@@ -75,7 +76,6 @@ class QuipQuantizer(object):
         ft_lr: float = 5e-5,
         ft_susv_lr: float = 5e-4,
         ft_epochs: int = 5,
-        ft_train_mode: bool = True,
         ft_train_size: int = 384,
         ft_valid_size: int = 128,
         ft_update_freq: int = 2,
@@ -104,18 +104,17 @@ class QuipQuantizer(object):
         self.ft_lr = ft_lr
         self.ft_susv_lr = ft_susv_lr
         self.ft_epochs = ft_epochs
-        self.ft_train_mode = ft_train_mode
         self.ft_train_size = ft_train_size
         self.ft_valid_size = ft_valid_size
         self.ft_update_freq = ft_update_freq
         self.ft_valid_freq = ft_valid_freq
         self.ft_early_stop = ft_early_stop
-        if self.ft_train_mode:
+        if self.ft_epochs > 0:
             self.all_samples = self.nsamples + self.ft_train_size + self.ft_valid_size
         else:
             self.all_samples = self.nsamples
 
-        if self.ft_train_mode and self.merge_suv:
+        if self.ft_epochs > 0 and self.merge_suv:
             raise ValueError("finetune mode is incompatible with merge_suv")
         if codebook not in ["D4", "E8P12", "HI", "E8P12RVQ3B", "E8P12RVQ4B"]:
             raise ValueError("Invalid codebook, has to be D4 or E8P12 or HI")
@@ -356,7 +355,7 @@ class QuipQuantizer(object):
             for k, v in kwargs.items(
             ):  # make sure other arguments also be captured
                 if k not in ["hidden_states"]:
-                    other_kwargs[k] = v
+                    other_kwargs[k] = v.to('cpu') if not self.cache_on_gpu else input
             layer_input_kwargs.append(other_kwargs)
             raise ValueError
 
@@ -430,20 +429,24 @@ class QuipQuantizer(object):
             for j in range(self.nsamples // self.batch_size):
                 layer_input = layer_inputs[j].to(get_device(
                     block)) if not self.cache_on_gpu else layer_inputs[j]
+                layer_input_kwarg = {k: v.to(get_device(
+                    block)) if not self.cache_on_gpu else v for k, v in layer_input_kwargs[j].items()}
                 layer_output = block(layer_input,
-                                     **layer_input_kwargs[j])[0]
+                                     **layer_input_kwarg)[0]
                 layer_outputs.append(layer_output.cpu(
                     ) if not self.cache_on_gpu else layer_output)
             # remove hook
             for h in handles:
                 h.remove()
             # add sample for finetune
-            if self.ft_train_mode:
+            if self.ft_epochs > 0:
                 for j in range(self.nsamples // self.batch_size, len(dataset)):
                     layer_input = layer_inputs[j].to(get_device(
                         block)) if not self.cache_on_gpu else layer_inputs[j]
+                    layer_input_kwarg = {k: v.to(get_device(
+                        block)) if not self.cache_on_gpu else v for k, v in layer_input_kwargs[j].items()}
                     layer_output = block(layer_input,
-                                         **layer_input_kwargs[j])[0]
+                                         **layer_input_kwarg)[0]
                     layer_outputs.append(layer_output.cpu(
                         ) if not self.cache_on_gpu else layer_output)
 
@@ -479,7 +482,7 @@ class QuipQuantizer(object):
                                      quantizers[f"{self.block_name_to_quantize}.{i}.{name}"])
                     quant_layer.to(get_device(layers[name]))
                     quant_layer.calc_weight()
-                if self.ft_train_mode and j < len(subset_name_lists) - 1:
+                if self.ft_epochs > 0 and j < len(subset_name_lists) - 1:
                     torch.set_grad_enabled(True)
                     block_fp32 = copy.deepcopy(block).float()
                     block_fp32.train()
@@ -541,9 +544,11 @@ class QuipQuantizer(object):
                 blocks[i] = block.to(device)
             del layers, layer_inputs, quant_method
             layer_inputs, layer_outputs = layer_outputs, []
+            gc.collect()
             torch.cuda.empty_cache()
 
         del layer_input_kwargs, quantizers
+        gc.collect()
         torch.cuda.empty_cache()
 
         if self.merge_suv:
@@ -565,7 +570,7 @@ class QuipQuantizer(object):
                         module.SU = None
 
         # end2end finetune
-        if self.ft_train_mode:
+        if self.ft_epochs > 0:
             module_names_after_last_block = get_preceding_modules(
                 model, self.block_name_to_quantize, reverse=True)
             module = nn.Sequential(*[
@@ -574,12 +579,18 @@ class QuipQuantizer(object):
             ])
             if not has_device_map:
                 module = module.to(0)
-            for j in range(len(dataset)):
-                layer_input = layer_inputs[j].to(get_device(
-                    module)) if not self.cache_on_gpu else layer_inputs[j]
+
+            train_size = self.ft_train_size // self.batch_size
+            valid_size = self.ft_valid_size // self.batch_size
+            for layer_input in layer_inputs[-train_size - valid_size]:
+                layer_input = layer_input.to(get_device(
+                    module)) if not self.cache_on_gpu else layer_input
                 layer_output = module(layer_input).softmax(dim=-1).float()
                 layer_outputs.append(layer_output.cpu(
                     ) if not self.cache_on_gpu else layer_output)
+
+            if not has_device_map:
+                module = module.to(device)
 
             # remove W to reduce memory
             for layer in get_layers(model, [QuantLinear]).values():
@@ -592,8 +603,6 @@ class QuipQuantizer(object):
             torch.set_grad_enabled(True)
             susv_params, params = extract_susv_params(model)
             optim = get_susv_adam(susv_params, params, self.ft_susv_lr, self.ft_lr)
-            train_size = self.ft_train_size // self.batch_size
-            valid_size = self.ft_valid_size // self.batch_size
             train_dataset = list(zip(
                 dataset[-train_size - valid_size: -valid_size],
                 layer_outputs[-train_size - valid_size: -valid_size]))
