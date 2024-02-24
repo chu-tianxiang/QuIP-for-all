@@ -258,7 +258,7 @@ def calculate_ce_loss(layer, dataset):
     with torch.no_grad():
         for layer_input, layer_output in dataset:
             layer_input = {k : v.to(device) for k, v in layer_input.items()}
-            logits = layer(**layer_input)
+            logits = layer(**layer_input)[0]
             total_loss += nn.CrossEntropyLoss()(
                 logits.view(-1, logits.shape[-1]),
                 layer_output.to(device).view(-1, logits.shape[-1]),
