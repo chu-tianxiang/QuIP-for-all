@@ -239,7 +239,8 @@ def calculate_mse_loss(layer, dataset):
     with torch.no_grad():
         for layer_input, layer_input_kwargs, layer_output in dataset:
             layer_input = layer_input.to(device)
-            layer_input_kwargs = {k: v.to(device) for k, v in layer_input_kwargs.items()}
+            layer_input_kwargs = {k: v.to(device) if isinstance(
+                v, torch.Tensor) else v for k, v in layer_input_kwargs.items()}
             total_loss += nn.MSELoss()(
                 layer(layer_input, **layer_input_kwargs)[0],
                 layer_output.to(device)

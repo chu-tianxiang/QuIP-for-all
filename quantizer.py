@@ -355,7 +355,7 @@ class QuipQuantizer(object):
             for k, v in kwargs.items(
             ):  # make sure other arguments also be captured
                 if k not in ["hidden_states"]:
-                    other_kwargs[k] = v.to('cpu') if not self.cache_on_gpu else input
+                    other_kwargs[k] = v.to('cpu') if not self.cache_on_gpu else v
             layer_input_kwargs.append(other_kwargs)
             raise ValueError
 
@@ -430,7 +430,8 @@ class QuipQuantizer(object):
                 layer_input = layer_inputs[j].to(get_device(
                     block)) if not self.cache_on_gpu else layer_inputs[j]
                 layer_input_kwarg = {k: v.to(get_device(
-                    block)) if not self.cache_on_gpu else v for k, v in layer_input_kwargs[j].items()}
+                    block)) if not self.cache_on_gpu and isinstance(
+                        v, torch.Tensor) else v for k, v in layer_input_kwargs[j].items()}
                 layer_output = block(layer_input,
                                      **layer_input_kwarg)[0]
                 layer_outputs.append(layer_output.cpu(
@@ -444,7 +445,8 @@ class QuipQuantizer(object):
                     layer_input = layer_inputs[j].to(get_device(
                         block)) if not self.cache_on_gpu else layer_inputs[j]
                     layer_input_kwarg = {k: v.to(get_device(
-                        block)) if not self.cache_on_gpu else v for k, v in layer_input_kwargs[j].items()}
+                        block)) if not self.cache_on_gpu and isinstance(
+                            v, torch.Tensor) else v for k, v in layer_input_kwargs[j].items()}
                     layer_output = block(layer_input,
                                          **layer_input_kwarg)[0]
                     layer_outputs.append(layer_output.cpu(
@@ -508,6 +510,9 @@ class QuipQuantizer(object):
                         for bidx, (layer_input, layer_input_kwarg, target_output
                                    ) in enumerate(train_dataset):
                             with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=True):
+                                layer_input_kwarg = {k: v.to(get_device(
+                                    block_fp32)) if not self.cache_on_gpu and isinstance(
+                                        v, torch.Tensor) else v for k, v in layer_input_kwarg.items()}
                                 output = block_fp32(layer_input.to(get_device(block_fp32)),
                                                     **layer_input_kwarg)[0]
                                 loss = nn.MSELoss()(output, target_output.to(get_device(block_fp32)))
