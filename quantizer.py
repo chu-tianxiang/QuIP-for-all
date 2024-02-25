@@ -492,6 +492,7 @@ class QuipQuantizer(object):
                     quant_layer = recurse_getattr(block, name)
                     quant_layer.pack(layers[name],
                                      quantizers[f"{self.block_name_to_quantize}.{i}.{name}"])
+                    layers[name].to("cpu")
                     quant_layer.to(block_dev)
                     quant_layer.calc_weight()
                 if self.ft_epochs > 0 and j < len(subset_name_lists) - 1:
@@ -547,6 +548,9 @@ class QuipQuantizer(object):
                             if worse_ct >= self.ft_early_stop:
                                 break
                     block.load_state_dict(best_sd)
+                    for name in subset_name_list:
+                        quant_layer = recurse_getattr(block, name)
+                        del quant_layer.W
                     del optim, train_dataset, valid_dataset
                     torch.cuda.empty_cache()
                     torch.set_grad_enabled(False)
@@ -596,20 +600,20 @@ class QuipQuantizer(object):
 
             train_size = self.ft_train_size // self.batch_size
             valid_size = self.ft_valid_size // self.batch_size
-            for layer_input in layer_inputs[-train_size - valid_size:]:
+            layer_inputs = layer_inputs[-train_size - valid_size:]
+            gc.collect()
+            for layer_input in layer_inputs:
                 layer_input = layer_input.to(get_device(
                     module)) if not self.cache_on_gpu else layer_input
                 layer_output = module(layer_input).softmax(dim=-1).float()
                 layer_outputs.append(layer_output.cpu(
                     ) if not self.cache_on_gpu else layer_output)
+            del layer_inputs
 
             module = module.to(origin_dtype)
             if not has_device_map:
                 module = module.to(device)
 
-            # remove W to reduce memory
-            for layer in get_layers(model, [QuantLinear]).values():
-                del layer.W
             model = model.float()
             model.gradient_checkpointing_enable()
             if not has_device_map:

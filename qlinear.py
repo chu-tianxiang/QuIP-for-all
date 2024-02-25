@@ -113,32 +113,30 @@ class QuantLinear(nn.Module):
 
     def pack(self, linear, attr):
         if attr["scaleWH"] is not None and not attr["merge_su"]:
-            self.SU = (attr["SU"] * attr["scaleWH"]).to(self.weight_dtype)
+            self.SU.data.copy_(attr["SU"] * attr["scaleWH"])
         elif attr["scaleWH"] is not None:
-            self.SU = attr["scaleWH"].to(self.weight_dtype)
+            self.SU.data.copy_(attr["scaleWH"])
         elif not attr["merge_su"]:
-            self.SU.data.copy_(attr["SU"].to(self.weight_dtype))
+            self.SU.data.copy_(attr["SU"])
         else:
             self.SU = None
-        self.Qidxs = attr["Qidxs"].clone()
-        if self.per_channel:
-            self.Wscale = attr["w_scale"].squeeze().to(self.weight_dtype)
-        else:
-            self.Wscale = attr["w_scale"].to(torch.float32)
+
         if not attr["merge_sv"]:
-            self.SV.data.copy_(attr["SV"].to(self.weight_dtype))
+            self.SV.data.copy_(attr["SV"])
         else:
             self.SV = None
+
+        self.Qidxs.copy_(attr["Qidxs"])
+        self.Wscale.copy_(attr["w_scale"].squeeze(
+            ) if self.per_channel else attr["w_scale"])
+
         if attr["left_hadK"] is not None:
-            self.had_left = attr["left_hadK"].to(self.weight_dtype)
+            self.had_left.copy_(attr["left_hadK"])
         if attr["right_hadK"] is not None:
-            self.had_right = attr["right_hadK"].to(self.weight_dtype)
+            self.had_right.copy_(attr["right_hadK"])
 
         if linear.bias is not None:
-            if attr["merge_sv"]:
-                self.bias = (linear.bias / attr["SV"]).to(self.weight_dtype)
-            else:
-                self.bias = linear.bias.to(self.weight_dtype)
+            self.bias.copy_(linear.bias / attr["SV"] if attr["merge_sv"] else linear.bias)
 
     @torch.no_grad()
     def calc_weight(self, cache=True):

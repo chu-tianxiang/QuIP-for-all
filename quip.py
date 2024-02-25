@@ -188,6 +188,7 @@ class QUIP:
             self.inp1 = None
             self.out1 = None
         self.H = None
+        self.mu = None
         self.layer.SU = None
         self.layer.SV = None
         torch.cuda.empty_cache()
