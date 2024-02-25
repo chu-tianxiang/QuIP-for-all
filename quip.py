@@ -171,15 +171,15 @@ class QUIP:
             self.layer.weight.data.dtype)
         Qidxs = self.cb.maybe_pack_idxs(Qidxs)
         attr = {
-            'left_hadK': left_hadK.to('cpu') if use_rand and left_hadK is not None else None,
-            'right_hadK': right_hadK.to('cpu') if use_rand and right_hadK is not None else None,
-            'Qidxs': Qidxs.to('cpu'),
-            'w_scale': w_scale.to('cpu'),
-            'SU': SU.to('cpu'),
-            'SV': SV.to('cpu'),
-            'merge_su': merge_su,
-            'merge_sv': merge_sv,
-            'scaleWH': scaleWH.to('cpu') if self.rescale_WH else None,
+            "left_hadK": left_hadK.to("cpu") if use_rand and left_hadK is not None else None,
+            "right_hadK": right_hadK.to("cpu") if use_rand and right_hadK is not None else None,
+            "Qidxs": Qidxs.to("cpu"),
+            "w_scale": w_scale.to("cpu"),
+            "SU": SU.to("cpu"),
+            "SV": SV.to("cpu"),
+            "merge_su": merge_su,
+            "merge_sv": merge_sv,
+            "scaleWH": scaleWH.to("cpu") if self.rescale_WH else None,
         }
         return attr
 

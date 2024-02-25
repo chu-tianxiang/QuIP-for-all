@@ -23,16 +23,16 @@ class E8P12RVQ4B_codebook(nn.Module):
         self.version = 0
         self.opt_resid_scale = 1 / 3.45 if opt_resid_scale is None else opt_resid_scale
 
-        self.register_buffer('grid_packed_abs', get_packed_abs_grid(), persistent=False)
+        self.register_buffer("grid_packed_abs", get_packed_abs_grid(), persistent=False)
 
         if not inference:
             _E8P_GRID, _ = get_full_grid(self.grid_packed_abs)
-            self.register_buffer('grid', _E8P_GRID, persistent=False)
-            self.register_buffer('grid_norm', self.grid.norm(dim=-1)**2, persistent=False)
+            self.register_buffer("grid", _E8P_GRID, persistent=False)
+            self.register_buffer("grid_norm", self.grid.norm(dim=-1)**2, persistent=False)
 
     def round(self, X, grid, grid_norm):
         assert X.shape[-1] == self.codesz
-        Xqidx = (2 * torch.matmul(X, grid.T) - grid_norm).argmax(-1)
+        Xqidx = (2 * X @ grid.T - grid_norm).argmax(-1)
         return grid[Xqidx], Xqidx
 
     def quantize(self, X, return_idx=True):

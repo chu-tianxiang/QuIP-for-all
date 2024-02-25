@@ -56,7 +56,7 @@ class QuipQuantizer(object):
     def __init__(
         self,
         codebook: str,
-        dataset: str,
+        dataset: str = "",
         nsamples: int = 4096,
         model_seqlen: int = 2048,
         quip_tune_iters: int = 10,
@@ -78,7 +78,7 @@ class QuipQuantizer(object):
         ft_epochs: int = 5,
         ft_train_size: int = 384,
         ft_valid_size: int = 128,
-        ft_update_freq: int = 2,
+        ft_batch_size: int = 8,
         ft_valid_freq: int = 1,
         ft_early_stop: int = 3,
         *args,
@@ -100,13 +100,14 @@ class QuipQuantizer(object):
         self.cache_on_gpu = cache_on_gpu
         self.modules_to_not_convert = modules_to_not_convert
         self.merge_suv = merge_suv
-        self.quant_method = 'QUiP'
+        self.quant_method = "QUiP"
         self.ft_lr = ft_lr
         self.ft_susv_lr = ft_susv_lr
         self.ft_epochs = ft_epochs
         self.ft_train_size = ft_train_size
         self.ft_valid_size = ft_valid_size
-        self.ft_update_freq = ft_update_freq
+        self.ft_batch_size = ft_batch_size
+        self.ft_update_freq = ft_batch_size // batch_size
         self.ft_valid_freq = ft_valid_freq
         self.ft_early_stop = ft_early_stop
         if self.ft_epochs > 0:
@@ -360,12 +361,12 @@ class QuipQuantizer(object):
                 else:
                     raise ValueError("No input value found in the foward pass")
             layer_inputs.append(
-                input.to('cpu') if not self.cache_on_gpu else input)
+                input.to("cpu") if not self.cache_on_gpu else input)
             other_kwargs = {}
             for k, v in kwargs.items(
             ):  # make sure other arguments also be captured
                 if k not in ["hidden_states"]:
-                    other_kwargs[k] = v.to('cpu') if not self.cache_on_gpu and isinstance(v, torch.Tensor) else v
+                    other_kwargs[k] = v.to("cpu") if not self.cache_on_gpu and isinstance(v, torch.Tensor) else v
             layer_input_kwargs.append(other_kwargs)
             raise ValueError
 
@@ -486,7 +487,7 @@ class QuipQuantizer(object):
                         f"{self.block_name_to_quantize}.{i}.{name}"] = attr
                     quant_method[name].free()
                 del subset_layers
-                # replace to quant layer for finetune
+                # replace to quant layer
                 self._replace_by_quant_layers(block, subset_name_list, train=True)
                 for name in subset_name_list:
                     quant_layer = recurse_getattr(block, name)
@@ -494,7 +495,11 @@ class QuipQuantizer(object):
                                      quantizers[f"{self.block_name_to_quantize}.{i}.{name}"])
                     layers[name].to("cpu")
                     quant_layer.to(block_dev)
-                    quant_layer.calc_weight()
+                    # cache the weight for faster finetune
+                    if self.ft_epochs > 0:
+                        quant_layer.calc_weight()
+
+                # Block-wise finetune
                 if self.ft_epochs > 0 and j < len(subset_name_lists) - 1:
                     torch.set_grad_enabled(True)
                     susv_params, params = extract_susv_params(block)
@@ -512,18 +517,19 @@ class QuipQuantizer(object):
                     ))
                     best_loss = calculate_mse_loss(block, valid_dataset)
                     best_sd = copy.deepcopy(block.state_dict())
-                    logger.info(f'Block {i + 1} initial loss {best_loss}')
+                    logger.info(f"Block {i + 1} initial loss {best_loss}")
                     scaler = torch.cuda.amp.GradScaler(enabled=True)
                     worse_ct = 0
                     for epoch in range(self.ft_epochs):
                         for bidx, (layer_input, layer_input_kwarg, target_output
                                    ) in enumerate(train_dataset):
-                            with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=True):
+                            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
                                 layer_input_kwarg = {k: v.to(block_dev
                                     ) if not self.cache_on_gpu and isinstance(v, torch.Tensor) else v for k, v in layer_input_kwarg.items()}
                                 output = block(layer_input.to(block_dev),
                                                **layer_input_kwarg)[0]
                                 loss = nn.MSELoss()(output, target_output.to(block_dev))
+                                loss = loss / self.ft_update_freq
                             scaler.scale(loss).backward()
                             if bidx % self.ft_update_freq == self.ft_update_freq - 1 or (
                                     bidx == len(train_dataset) - 1):
@@ -535,18 +541,15 @@ class QuipQuantizer(object):
                             test_loss = calculate_mse_loss(block, valid_dataset)
                             if test_loss < best_loss:
                                 logger.info(
-                                    f'Block {i + 1} @ epoch {epoch} new loss {test_loss} old loss {best_loss} BETTER'
+                                    f"Block {i + 1} @ epoch {epoch} new loss {test_loss} old loss {best_loss} BETTER"
                                 )
                                 best_loss = test_loss
                                 best_sd = copy.deepcopy(block.state_dict())
                                 worse_ct = 0
-                        else:
-                            logger.info(
-                                f'Block {i + 1} @ epoch {epoch} new loss {test_loss} old loss {best_loss} WORSE'
-                            )
-                            worse_ct += 1
-                            if worse_ct >= self.ft_early_stop:
-                                break
+                            else:
+                                worse_ct += 1
+                                if worse_ct >= self.ft_early_stop:
+                                    break
                     block.load_state_dict(best_sd)
                     for name in subset_name_list:
                         quant_layer = recurse_getattr(block, name)
@@ -573,20 +576,20 @@ class QuipQuantizer(object):
                 if (isinstance(module, nn.LayerNorm) or "rmsnorm" in str(module.__class__).lower()
                     ) and hasattr(module, "SV"):
                     module.weight.div_(module.SV)
-                    if hasattr(module, 'bias') and module.bias is not None:
+                    if hasattr(module, "bias") and module.bias is not None:
                         module.bias.div_(module.SV)
                     module.SV = None
                 if isinstance(module, nn.Linear):
                     if hasattr(module, "SV"):
                         module.weight.div_(module.SV.unsqueeze(-1))
-                        if hasattr(module, 'bias') and module.bias is not None:
+                        if hasattr(module, "bias") and module.bias is not None:
                             module.bias.div_(module.SV)
                         module.SV = None
                     if hasattr(module, "SU"):
                         module.weight.div_(module.SU)
                         module.SU = None
 
-        # end2end finetune
+        # Step 4: End2end finetune
         if self.ft_epochs > 0:
             module_names_after_last_block = get_preceding_modules(
                 model, self.block_name_to_quantize, reverse=True)
@@ -634,11 +637,11 @@ class QuipQuantizer(object):
             scaler = torch.cuda.amp.GradScaler(enabled=True)
 
             best_sd = copy.deepcopy(model.state_dict())
-            logger.info(f'initial loss {best_loss}')
+            logger.info(f"End2end initial loss {best_loss}")
             worse_ct = 0
             for epoch in range(self.ft_epochs):
                 for bidx, (layer_input, target_output) in enumerate(train_dataset):
-                    with torch.autocast(device_type='cuda',
+                    with torch.autocast(device_type="cuda",
                                         dtype=torch.float16,
                                         enabled=True):
                         layer_input = {k : v.to(0) for k, v in layer_input.items()}
@@ -646,6 +649,7 @@ class QuipQuantizer(object):
                         loss = nn.CrossEntropyLoss()(
                             output.view(-1, output.shape[-1]),
                             target_output.to(output.device).view(-1, output.shape[-1]))
+                        loss = loss / self.ft_update_freq
                     scaler.scale(loss).backward()
                     if bidx % self.ft_update_freq == self.ft_update_freq - 1 or bidx == len(
                         train_dataset) - 1:
@@ -657,15 +661,12 @@ class QuipQuantizer(object):
                     test_loss = calculate_ce_loss(model, valid_dataset)
                     if test_loss < best_loss:
                         logger.info(
-                            f'epoch {epoch} new loss {test_loss} old loss {best_loss} BETTER'
+                            f"epoch {epoch} new loss {test_loss} old loss {best_loss} BETTER"
                         )
                         best_loss = test_loss
                         best_sd = copy.deepcopy(model.state_dict())
                         worse_ct = 0
                     else:
-                        logger.info(
-                             f'epoch {epoch} new loss {test_loss} old loss {best_loss} WORSE'
-                        )
                         worse_ct += 1
                         if worse_ct >= self.ft_early_stop:
                             break

@@ -23,12 +23,12 @@ class HI4B1C_codebook(nn.Module):
         self.version = 0
 
         if not inference:
-            self.register_buffer('grid', get_grid(), persistent=False)
-            self.register_buffer('grid_norm', torch.diag(self.grid @ self.grid.T), persistent=False)
+            self.register_buffer("grid", get_grid(), persistent=False)
+            self.register_buffer("grid_norm", torch.diag(self.grid @ self.grid.T), persistent=False)
 
     def round(self, X, grid, grid_norm):
         assert X.shape[-1] == self.codesz
-        Xqidx = (2 * torch.matmul(X, grid.T) - grid_norm).argmax(-1)
+        Xqidx = (2 * X @ grid.T - grid_norm).argmax(-1)
         return grid[Xqidx], Xqidx
 
     def quantize(self, X, return_idx=True):

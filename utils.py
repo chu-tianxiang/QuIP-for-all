@@ -212,7 +212,7 @@ def extract_susv_params(module):
     params = []
     for name, param in module.named_parameters():
         if param.requires_grad:
-            if 'SU' in name or 'SV' in name:
+            if "SU" in name or "SV" in name:
                 susv_params.append(param)
             else:
                 params.append(param)
@@ -222,12 +222,12 @@ def extract_susv_params(module):
 def get_susv_adam(susv_params, params, ft_susv_lr, ft_lr):
     return torch.optim.Adam([
         {
-            'params': susv_params,
-            'lr': ft_susv_lr
+            "params": susv_params,
+            "lr": ft_susv_lr
         },
         {
-            'params': params,
-            'lr': ft_lr
+            "params": params,
+            "lr": ft_lr
         },
     ])
 

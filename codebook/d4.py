@@ -103,7 +103,7 @@ class D4_codebook(nn.Module):
         self.id = "D4"
         self.register_buffer("grid", build_D4_CB(), persistent=False)
         if not inference:
-            self.register_buffer('grid_norm', (self.grid @ self.grid.T).diag(),
+            self.register_buffer("grid_norm", (self.grid @ self.grid.T).diag(),
                                  persistent=False)
         self.codesz = _D4_CODESZ
         self.opt_scale = 1.21
@@ -113,7 +113,7 @@ class D4_codebook(nn.Module):
         self.version = 0
 
     def _quantize_noscale(self, X, return_idx=True):
-        Xqidx = (2 * torch.matmul(X, self.grid.T) - self.grid_norm).argmax(1)
+        Xqidx = (2 * X @ self.grid.T - self.grid_norm).argmax(1)
         if return_idx:
             return self.grid[Xqidx, :], Xqidx.to(self.idx_dtype)
         return self.grid[Xqidx, :]

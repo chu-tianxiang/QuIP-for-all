@@ -29,13 +29,13 @@ class QuantLinear(nn.Module):
         had_left, self.K_left, self.q_in_features = get_hadK(in_features, use_rand)
         had_right, self.K_right, self.q_out_features = get_hadK(out_features, use_rand)
         if had_left is not None:
-            self.register_buffer('had_left',
+            self.register_buffer("had_left",
                                  had_left.to(weight_dtype),
                                  persistent=use_rand)
         else:
             self.had_left = None
         if had_right is not None:
-            self.register_buffer('had_right',
+            self.register_buffer("had_right",
                                  had_right.to(weight_dtype),
                                  persistent=use_rand)
         else:
@@ -76,7 +76,7 @@ class QuantLinear(nn.Module):
 
         if bias:
             self.register_buffer(
-                'bias', torch.zeros((out_features), dtype=weight_dtype))
+                "bias", torch.zeros((out_features), dtype=weight_dtype))
         else:
             self.bias = None
 
