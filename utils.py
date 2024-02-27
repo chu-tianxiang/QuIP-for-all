@@ -20,7 +20,14 @@ import torch
 from torch import nn
 from transformers.pytorch_utils import Conv1D
 
-from constants import BLOCK_PATTERNS, SEQLEN_KEYS_TRANFORMERS
+from constants import (
+    BLOCK_PATTERNS,
+    SEQLEN_KEYS_TRANFORMERS,
+    ATTN_QKV_PATTERNS,
+    ATTN_OUT_PATTENRS,
+    FC1_PATTERN,
+    FC2_PATTERN,
+)
 
 logger = getLogger(__name__)
 
@@ -86,7 +93,9 @@ def get_block_name_with_pattern(model: nn.Module):
     )
 
 
-def get_preceding_modules(model: nn.Module, module_name: str):
+def get_preceding_modules(model: nn.Module,
+                          module_name: str,
+                          reverse: bool = False):
     previous_module_name = []
     stop_adding = False
 
@@ -94,7 +103,10 @@ def get_preceding_modules(model: nn.Module, module_name: str):
                                module_name: str,
                                name: str = ""):
         nonlocal stop_adding
-        for name_bis, child in model.named_children():
+        modules = model.named_children()
+        if reverse:
+            modules = reversed(list(modules))
+        for name_bis, child in modules:
             new_name = name + "." + name_bis if name != "" else name_bis
             if new_name == module_name:
                 stop_adding = True
@@ -182,3 +194,75 @@ def get_layers_for_scaling(model):
     else:
         raise ValueError(f"{model_name} not supported for merging SU/SV. Please set merge_suv to False")
     return layers
+
+
+def split_block_to_sublayers(layers):
+    qkv_layers = [name for name in layers if name in ATTN_QKV_PATTERNS]
+    out_layers = [name for name in layers if name in ATTN_OUT_PATTENRS]
+    fc1_layers = [name for name in layers if name in FC1_PATTERN]
+    fc2_layers = [name for name in layers if name in FC2_PATTERN]
+    if len(qkv_layers) + len(out_layers) + len(fc1_layers) + len(fc2_layers) != len(layers):
+        logger.info("We could not infer the split for this model. will treating the block as a whole")
+        return [layers]
+    return [qkv_layers, out_layers, fc1_layers, fc2_layers]
+
+
+def extract_susv_params(module):
+    susv_params = []
+    params = []
+    for name, param in module.named_parameters():
+        if param.requires_grad:
+            if "SU" in name or "SV" in name:
+                susv_params.append(param)
+            else:
+                params.append(param)
+    return susv_params, params
+
+
+def get_susv_adam(susv_params, params, ft_susv_lr, ft_lr):
+    return torch.optim.Adam([
+        {
+            "params": susv_params,
+            "lr": ft_susv_lr
+        },
+        {
+            "params": params,
+            "lr": ft_lr
+        },
+    ])
+
+def calculate_mse_loss(layer, dataset):
+    layer.eval()
+    device = get_device(layer)
+    total_loss = 0
+    num_samples = 0
+    with torch.no_grad():
+        for layer_input, layer_input_kwargs, layer_output in dataset:
+            layer_input = layer_input.to(device)
+            layer_input_kwargs = {k: v.to(device) if isinstance(
+                v, torch.Tensor) else v for k, v in layer_input_kwargs.items()}
+            total_loss += nn.MSELoss()(
+                layer(layer_input, **layer_input_kwargs)[0],
+                layer_output.to(device)
+            )
+            num_samples += 1
+    layer.train()
+    return (total_loss / num_samples).cpu().item()
+
+
+def calculate_ce_loss(layer, dataset):
+    layer.eval()
+    device = get_device(layer)
+    total_loss = 0
+    num_samples = 0
+    with torch.no_grad():
+        for layer_input, layer_output in dataset:
+            layer_input = {k : v.to(device) for k, v in layer_input.items()}
+            logits = layer(**layer_input)[0]
+            total_loss += nn.CrossEntropyLoss()(
+                logits.view(-1, logits.shape[-1]),
+                layer_output.to(device).view(-1, logits.shape[-1]),
+            )
+            num_samples += 1
+    layer.train()
+    return (total_loss / num_samples).cpu().item()

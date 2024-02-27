@@ -101,9 +101,10 @@ class D4_codebook(nn.Module):
     def __init__(self, inference=False, **kwargs):
         super(D4_codebook, self).__init__()
         self.id = "D4"
-        self.register_buffer("grid", build_D4_CB())
+        self.register_buffer("grid", build_D4_CB(), persistent=False)
         if not inference:
-            self.register_buffer('grid_norm', (self.grid @ self.grid.T).diag())
+            self.register_buffer("grid_norm", (self.grid @ self.grid.T).diag(),
+                                 persistent=False)
         self.codesz = _D4_CODESZ
         self.opt_scale = 1.21
         self.idx_dtype = torch.uint8
@@ -124,16 +125,20 @@ class D4_codebook(nn.Module):
     def maybe_pack_idxs(self, idxs):
         return idxs
 
+    def decompress_weight(self, Qidxs):
+        W_decompressed = torch.zeros(
+            Qidxs.shape[0], Qidxs.shape[1] * _D4_CODESZ,
+            dtype=torch.float16, device=Qidxs.device
+        )
+        quiptools_cuda.decompress_d4_origorder(Qidxs, self.grid, W_decompressed)
+        return W_decompressed
+
     def forward(self,
                 input,
                 Qidxs):
         if input.shape[0] < 24:
             output = quiptools_cuda.d4_mm_origorder(input, Qidxs, self.grid)
         else:
-            W_decompressed = torch.zeros(
-                Qidxs.shape[0], Qidxs.shape[1] * _D4_CODESZ,
-                dtype=torch.float16, device=input.device
-            )
-            quiptools_cuda.decompress_d4_origorder(Qidxs, self.grid, W_decompressed)
+            W_decompressed = self.decompress_weight(Qidxs)
             output = input @ W_decompressed.t()
         return output

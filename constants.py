@@ -24,3 +24,72 @@ BLOCK_PATTERNS = [
 ]
 
 QUIP_CONFIG = "quantization_config.json"
+
+ATTN_QKV_PATTERNS = [
+    "self_attention.query_key_value",
+    "attention.query_key_value",
+    "attn.c_attn",
+    "attn.qkv_proj",
+    "self_attn.W_pack",
+    "self_attn.k_proj",
+    "self_attn.v_proj",
+    "self_attn.q_proj",
+    "attn.k_proj",
+    "attn.v_proj",
+    "attn.q_proj"
+]
+
+ATTN_OUT_PATTENRS = [
+    "self_attention.dense",
+    "self_attn.out_proj",
+    "self_attn.o_proj",
+    "attn.c_proj",
+    "attn.out_proj",
+    "attention.dense",
+]
+
+FC1_PATTERN = [
+    "mlp.dense_h_to_4h",
+    "mlp.up_proj",
+    "mlp.gate_proj",
+    "mlp.c_fc",
+    "mlp.fc_in",
+    "fc1",
+    "mlp.w1",
+    "mlp.w2",
+    # mixtral moe
+    "block_sparse_moe.experts.0.w1",
+    "block_sparse_moe.experts.1.w1",
+    "block_sparse_moe.experts.2.w1",
+    "block_sparse_moe.experts.3.w1",
+    "block_sparse_moe.experts.4.w1",
+    "block_sparse_moe.experts.5.w1",
+    "block_sparse_moe.experts.6.w1",
+    "block_sparse_moe.experts.7.w1",
+    "block_sparse_moe.experts.0.w3",
+    "block_sparse_moe.experts.1.w3",
+    "block_sparse_moe.experts.2.w3",
+    "block_sparse_moe.experts.3.w3",
+    "block_sparse_moe.experts.4.w3",
+    "block_sparse_moe.experts.5.w3",
+    "block_sparse_moe.experts.6.w3",
+    "block_sparse_moe.experts.7.w3",
+]
+
+FC2_PATTERN = [
+    "mlp.dense_4h_to_h",
+    "mlp.down_proj",
+    "mlp.c_proj",
+    "mlp.fc_out",
+    "mlp.c_proj",
+    "fc2",
+    # mixtral moe
+    "block_sparse_moe.experts.0.w2",
+    "block_sparse_moe.experts.1.w2",
+    "block_sparse_moe.experts.2.w2",
+    "block_sparse_moe.experts.3.w2",
+    "block_sparse_moe.experts.4.w2",
+    "block_sparse_moe.experts.5.w2",
+    "block_sparse_moe.experts.6.w2",
+    "block_sparse_moe.experts.7.w2",
+]

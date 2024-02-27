@@ -36,12 +36,20 @@ tokenizer.save_pretrained(quant_dir)
 
 Arguments of `QuipQuantizer` includes:
 * codebook: the algorithm for quantization, including `E8P12`(2-bit), `E8P12RVQ3B`(3-bit), `E8P12RVQ4B`(4-bit), `D4`(2-bit), `HI`(4-bit). `D4` and `HI` are relatively inferior to E8P12-based methods.
-* dataset: the data used for calibration, supports `c4`, `ptb`, `wikitext2`.
-* nsamples: number of samples used for calibration, larger is slower. By default 4096 samples of calibration data will be used as [suggested by the author](https://github.com/Cornell-RelaxML/quip-sharp/issues/13#issuecomment-1848867522), which is very time consuming.
+* dataset: the data used for calibration, supports `c4`, `ptb`, `wikitext2`, `redpajama`.
+* nsamples: number of samples used for calibration, larger is slower. By default 4096 samples of calibration data will be used as [suggested by the author](https://github.com/Cornell-RelaxML/quip-sharp/issues/13#issuecomment-1848867522), but this can be time-consuming.
 * quip_tune_iters: Greedy update passes of the algorithm, higher is slower but yields slightly better quanlity. Default to 10.
-* use_rand: when the dim is not powers of 2, say `dim = 2^n * base`, use_rand will decompose it into `2^n` Hadamard matrix and `base x base` random orthogonal matrices, instead of decomposing to two Hadamard matrix in the original implementation which is not always feasible. Default to true.
+* use_rand: A boolean flag that determines the decomposition strategy for dimensionality that is not a power of two. Say `dim = 2^n * base`, `True` will decompose it into `2^n` Hadamard matrix and `base x base` random orthogonal matrices, `False` will decompose into two Hadamard matrix following the original implementation and use padding when such decomposition cannot be found. Default to true.
 * modules_to_not_convert: the name of layers not to quantize, useful for MOE models where gate layer is often unquantized.
-* merge_suv: trick to cancel out some vectors to reduce calculation. Only support llama, mixtral and qwen. Default to false.
+* merge_suv: An optional optimization that can cancel out certain vectors to reduce computation. It is currently only supported for llama, mixtral, and qwen models. The default setting is false.
+* ft_lr: The learning rate for the fine-tuning stage, as described in the paper's appendix. The default value is 5e-5.
+* ft_susv_lr: The learning rate for the SU/SV parameters during fine-tuning. The default value is 5e-4.
+* ft_epochs: The number of epochs for fine-tuning. The default is set to 5.
+* ft_train_size: The size of the training dataset used for fine-tuning. Larger sizes require more CPU memory as it needs to calculate a larger logit matrix. The default is 384.
+* ft_valid_size: The size of the validation dataset for fine-tuning. The default is 128.
+* ft_batch_size: Batch size for the fine-tuning process. The default is 8.
+* ft_valid_freq: The frequency, in epochs, at which the validation is run. The default is every epoch.
+* ft_early_stop: The number of epochs to wait for an improvement in validation loss before early stopping. The default is 3 epochs.
 
 
 ### Inference
