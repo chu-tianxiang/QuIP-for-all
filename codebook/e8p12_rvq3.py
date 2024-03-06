@@ -4,14 +4,16 @@ E8 3 bit.
 Made from 2 bit E8P + 1 bit E8 with RVQ.
 """
 from fractions import Fraction
+from functools import cache
 
 import numpy as np
 import torch
 from torch import nn
 
-import quiptools_cuda
 from .e8p12 import get_full_grid, get_packed_abs_grid, _E8P_CODESZ
 
+
+@cache
 def get_e81bgrid():
     intr = torch.arange(-4, 4)
     hintr = intr + 1 / 2
@@ -45,8 +47,10 @@ def get_e81bgrid():
     ])
 
     e8 = torch.concat([e8, norm4], dim=0)
-    return e8.to(torch.float16)
+    return e8
 
+
+@cache
 def pack_e81b(cba):
     cba = cba[:, [0, 2, 4, 6, 1, 3, 5, 7]]
     cba = cba * 2
@@ -103,21 +107,16 @@ class E8P12RVQ3B_codebook(nn.Module):
         return idxs
 
     def decompress_weight(self, Qidxs):
-        W_decompressed = torch.empty(
-            Qidxs.shape[0], Qidxs.shape[1] * 32 // 3,
-            dtype=torch.float16, device=Qidxs.device
-        )
-        quiptools_cuda.decompress_e8prvq3_origorder(
+        return torch.ops.quip_lib.decompress_e8prvq3_origorder(
             Qidxs, self.grid_packed_abs, self.e81b_grid_packed,
-            W_decompressed, self.opt_resid_scale
+            self.opt_resid_scale
         )
-        return W_decompressed
 
     def forward(self,
                 input,
                 Qidxs):
         if input.size(0) < 32:
-            output = quiptools_cuda.e8prvq3_mm_origorder(
+            output = torch.ops.quip_lib.e8prvq3_mm_origorder(
                 input,
                 Qidxs,
                 self.grid_packed_abs,

@@ -73,6 +73,9 @@ class QuantLinear(nn.Module):
         else:
             self.register_buffer("Wscale", torch.ones((), dtype=torch.float))
         self.wscale_float = 1.0
+        # transformers use weight to decide device
+        # so we register a fake weight here
+        self.register_buffer('weight', torch.zeros((),  dtype=weight_dtype))
 
         if bias:
             self.register_buffer(

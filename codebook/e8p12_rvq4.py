@@ -6,7 +6,6 @@ E8 4 bit.
 import torch
 from torch import nn
 
-import quiptools_cuda
 from .e8p12 import get_full_grid, get_packed_abs_grid, _E8P_CODESZ
 
 
@@ -49,20 +48,15 @@ class E8P12RVQ4B_codebook(nn.Module):
         return idxs
 
     def decompress_weight(self, Qidxs):
-        W_decompressed = torch.empty(
-            Qidxs.shape[0], Qidxs.shape[1] * 8,
-            dtype=torch.float16, device=Qidxs.device
+        return torch.ops.quip_lib.decompress_e8prvq4_origorder(
+            Qidxs, self.grid_packed_abs, self.opt_resid_scale
         )
-        quiptools_cuda.decompress_e8prvq4_origorder(
-            Qidxs, self.grid_packed_abs, W_decompressed, self.opt_resid_scale
-        )
-        return W_decompressed
 
     def forward(self,
                 input,
                 Qidxs):
         if input.size(0) < 32:
-            output = quiptools_cuda.e8prvq4_mm_origorder(
+            output = torch.ops.quip_lib.e8prvq4_mm_origorder(
                 input,
                 Qidxs,
                 self.grid_packed_abs,

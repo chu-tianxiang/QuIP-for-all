@@ -1,10 +1,11 @@
 # https://github.com/Cornell-RelaxML/quip-sharp/blob/main/lib/codebook/half_integer_4bit_1col.py
+from functools import cache
+
 import torch
 from torch import nn
 
-import quiptools_cuda
 
-
+@cache
 def get_grid():
     hintr = torch.arange(-8, 8) + 1 / 2
     return hintr.unsqueeze(-1)
@@ -49,18 +50,13 @@ class HI4B1C_codebook(nn.Module):
             (idxs[:, 7::self.packsz] << 4*7)
 
     def decompress_weight(self, Qidxs):
-        W_decompressed = torch.zeros(
-            Qidxs.shape[0], Qidxs.shape[1] * self.packsz,
-            dtype=torch.float16, device=Qidxs.device
-        )
-        quiptools_cuda.decompress_hi_origorder(Qidxs, W_decompressed)
-        return W_decompressed
+        return torch.ops.quip_lib.decompress_hi_origorder(Qidxs)
 
     def forward(self,
                 input,
                 Qidxs):
         if input.shape[0] < 32:
-            output = quiptools_cuda.hi_mm_origorder(input, Qidxs)
+            output = torch.ops.quip_lib.hi_mm_origorder(input, Qidxs)
         else:
             W_decompressed = self.decompress_weight(Qidxs)
             output = input @ W_decompressed.t()

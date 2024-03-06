@@ -7,15 +7,14 @@ The total codebook is all 2^7 flips of these 256 entries (2^15) +- 1/4
 which makes 2^16 entries.
 This corresponds to a subset of E8 + 1/4
 """
+from functools import cache
+
 import numpy as np
 import torch
 from torch import nn
 
-import quiptools_cuda
-
 
 _E8P_CODESZ = 8
-_INT_MAP = 2**(torch.arange(_E8P_CODESZ).flip(0))
 
 
 def int2mask(i, int_map):
@@ -61,6 +60,7 @@ def get_norm12():
     ]) / 2
 
 
+@cache
 def get_packed_abs_grid():
     intr = torch.arange(-4, 4)
     d8 = torch.cartesian_prod(*[intr] * 8).float() + 1 / 2
@@ -79,16 +79,7 @@ def get_packed_abs_grid():
     return acc
 
 
-def get_abs_grid():
-    intr = torch.arange(-4, 4)
-    d8 = torch.cartesian_prod(*[intr] * _E8P_CODESZ).float() + 1 / 2
-    d8m2 = (d8.sum(dim=-1) % 2 == 0)
-    d8n = d8.norm(dim=-1)**2 <= 10
-    d8abs = torch.unique(d8[sorted(torch.where(d8m2 * d8n)[0])].abs(), dim=0)
-    norm12 = get_norm12()
-    return torch.concat([d8abs, norm12], dim=0)
-
-
+@cache
 def get_full_grid(packed_abs_grid):
     synth_codebook = torch.zeros(1 << 16, 8)
     shuffle_map = [0, 2, 1, 3, 4, 6, 5, 7]
@@ -146,20 +137,15 @@ class E8P12_codebook(nn.Module):
         return idxs
 
     def decompress_weight(self, Qidxs):
-        W_decompressed = torch.empty(
-            Qidxs.shape[0], Qidxs.shape[1] * _E8P_CODESZ,
-            dtype=torch.float16, device=Qidxs.device
+        return torch.ops.quip_lib.decompress_e8p_origorder(
+            Qidxs, self.grid_packed_abs
         )
-        quiptools_cuda.decompress_e8p_origorder(
-            Qidxs, self.grid_packed_abs, W_decompressed
-        )
-        return W_decompressed
 
     def forward(self,
                 input,
                 Qidxs):
         if input.size(0) < 32:
-            output = quiptools_cuda.e8p_mm_origorder(
+            output = torch.ops.quip_lib.e8p_mm_origorder(
                 input,
                 Qidxs,
                 self.grid_packed_abs

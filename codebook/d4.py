@@ -14,11 +14,10 @@ this results in a codebook of 256 points distributed as follows
     4 * 8 = 32           [1/2, 1/2, 1/2, 5/2]
     4 * 3 * 8 = 96       [1/2, 1/2, 3/2, 5/2]
 """
+from functools import cache
 
 import torch
 from torch import nn
-
-import quiptools_cuda
 
 
 _D4_CODESZ = 4
@@ -87,6 +86,7 @@ def code8_to_d4(i8):
             return code3_signs(i3, x)
 
 
+@cache
 def build_D4_CB():
     CB = torch.zeros(256, _D4_CODESZ)
     for i in range(256):
@@ -126,18 +126,13 @@ class D4_codebook(nn.Module):
         return idxs
 
     def decompress_weight(self, Qidxs):
-        W_decompressed = torch.zeros(
-            Qidxs.shape[0], Qidxs.shape[1] * _D4_CODESZ,
-            dtype=torch.float16, device=Qidxs.device
-        )
-        quiptools_cuda.decompress_d4_origorder(Qidxs, self.grid, W_decompressed)
-        return W_decompressed
+        return torch.ops.quip_lib.decompress_d4_origorder(Qidxs, self.grid)
 
     def forward(self,
                 input,
                 Qidxs):
         if input.shape[0] < 24:
-            output = quiptools_cuda.d4_mm_origorder(input, Qidxs, self.grid)
+            output = torch.ops.quip_lib.d4_mm_origorder(input, Qidxs, self.grid)
         else:
             W_decompressed = self.decompress_weight(Qidxs)
             output = input @ W_decompressed.t()

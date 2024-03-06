@@ -3,7 +3,6 @@ import math
 
 import scipy
 import torch
-import fast_hadamard_transform
 from safetensors.torch import load_file
 
 had_tensors = load_file("hadamard.safetensors")
@@ -76,13 +75,11 @@ def matmul_hadU_cuda(X, hadK, K, n, scale=None, transpose=False):
     had_scale = 1 / math.sqrt(n // K) if scale is None else scale / math.sqrt(n // K)
 
     if K == 1:
-        return fast_hadamard_transform.hadamard_transform(X,
-            scale=had_scale)
+        return torch.ops.quip_lib.hadamard(X, had_scale)
     if transpose:
         hadK = hadK.T.contiguous()
     input = X.view(-1, K, n // K)
-    input = fast_hadamard_transform.hadamard_transform(input,
-        scale=had_scale)
+    input = torch.ops.quip_lib.hadamard(input, had_scale)
     input = hadK @ input
     return input.reshape(X.shape)
 

@@ -34,6 +34,7 @@ from accelerate.hooks import remove_hook_from_module
 from safetensors.torch import load_file
 from huggingface_hub import snapshot_download
 
+import register_lib
 from constants import QUIP_CONFIG
 from data import get_dataset, prepare_dataset
 from utils import (get_block_name_with_pattern, get_device, get_layers,
@@ -495,13 +496,14 @@ class QuipQuantizer(object):
                                      quantizers[f"{self.block_name_to_quantize}.{i}.{name}"])
                     layers[name].to("cpu")
                     quant_layer.to(block_dev)
-                    # cache the weight for faster finetune
-                    if self.ft_epochs > 0:
-                        quant_layer.calc_weight()
 
                 # Block-wise finetune
                 if self.ft_epochs > 0 and j < len(subset_name_lists) - 1:
                     torch.set_grad_enabled(True)
+                    # cache the weight for faster finetune
+                    for name in subset_name_list:
+                        quant_layer = recurse_getattr(block, name)
+                        quant_layer.calc_weight()
                     susv_params, params = extract_susv_params(block)
                     optim = get_susv_adam(susv_params, params, self.ft_susv_lr, self.ft_lr)
                     train_size = self.ft_train_size // self.batch_size
