@@ -29,9 +29,7 @@ tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16)
 
 quant = QuipQuantizer(codebook="E8P12", dataset="redpajama")
-quant_model = quant.quantize_model(model, tokenizer)
-quant.save(quant_model, quant_dir)
-tokenizer.save_pretrained(quant_dir)
+quant.quantize_model(model, tokenizer, quant_dir)
 ```
 
 Arguments of `QuipQuantizer` includes:
@@ -50,7 +48,7 @@ Arguments of `QuipQuantizer` includes:
 * ft_batch_size: Batch size for the fine-tuning process. The default is 8.
 * ft_valid_freq: The frequency, in epochs, at which the validation is run. The default is every epoch.
 * ft_early_stop: The number of epochs to wait for an improvement in validation loss before early stopping. The default is 3 epochs.
-
+* ft_embedding: Whether finetune input and output embedding layer during end2end finetune stage. The default is false.
 
 ### Inference
 ```python
@@ -65,6 +63,9 @@ tokenizer = AutoTokenizer.from_pretrained(quant_dir)
 input_ids = tokenizer.encode("The capital of France is", return_tensors="pt").cuda()
 print(tokenizer.decode(quant_model.generate(input_ids, do_sample=True)[0]))
 ```
+
+### Finetune
+Finetune with Lora adapter is supported. Please check `example_finetune.py` as a minial example.
 
 ## Speedup
 

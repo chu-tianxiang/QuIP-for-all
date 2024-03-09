@@ -14,17 +14,17 @@ class QuantLinear(nn.Module):
                  bias=True,
                  use_rand=True,
                  per_channel=False,
-                 weight_dtype=torch.float16,
-                 train=False):
+                 weight_dtype=torch.float16):
         super().__init__()
 
-        self.in_features = in_features
-        self.out_features = out_features
+        # peft need infeatures and outfeatures
+        # todo: replace all in_features with infeatures
+        self.in_features = self.infeatures = in_features
+        self.out_features = self.outfeatures = out_features
         self.codebook = codebook
         self.use_rand = use_rand
         self.per_channel = per_channel
         self.weight_dtype = weight_dtype
-        self.train_mode = train
 
         had_left, self.K_left, self.q_in_features = get_hadK(in_features, use_rand)
         had_right, self.K_right, self.q_out_features = get_hadK(out_features, use_rand)
@@ -90,7 +90,7 @@ class QuantLinear(nn.Module):
         if self.SU is not None:
             x = x * self.SU
 
-        if self.train_mode:
+        if self.training:
             if x.shape[-1] != self.q_in_features:
                 x = torch.nn.functional.pad(x, (0, self.q_in_features - x.shape[-1]))
             W = self.W if hasattr(self, "W") else self.calc_weight(cache=False).to(x.dtype)

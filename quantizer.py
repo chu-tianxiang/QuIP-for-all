@@ -15,7 +15,8 @@
 import gc
 import json
 import os
-import copy
+import shutil
+import tempfile
 from logging import getLogger
 from typing import Any, Dict, List, Optional, Union
 
@@ -159,22 +160,20 @@ class QuipQuantizer(object):
         """
         return cls(**config_dict)
 
-    def convert_model(self, model: nn.Module, train: bool = False):
+    def convert_model(self, model: nn.Module):
         """
         Convert the model to a Quip model by getting and replacing the layers.
 
         Args:
             model (`nn.Module`):
                 Model to be converted
-            train (`bool`):
-                Finetune mode or inference mode
 
         """
         if self.block_name_to_quantize is None:
             self.block_name_to_quantize = get_block_name_with_pattern(model)
         block_name = self.block_name_to_quantize
         layers_to_be_replaced = get_layers(model, prefix=block_name, skip=self.modules_to_not_convert)
-        self._replace_by_quant_layers(model, layers_to_be_replaced, train=train)
+        self._replace_by_quant_layers(model, layers_to_be_replaced)
 
         return model
 
@@ -194,8 +193,7 @@ class QuipQuantizer(object):
     def _replace_by_quant_layers(self,
                                  module: nn.Module,
                                  names: List[str],
-                                 name: str = "",
-                                 train: bool = False):
+                                 name: str = ""):
         """
         Replaces linear layers in `module` by `QuantLinear`
 
@@ -239,8 +237,7 @@ class QuipQuantizer(object):
                                         bias=(layer.bias is not None),
                                         use_rand=self.use_rand,
                                         per_channel=self.per_channel,
-                                        weight_dtype=layer.weight.dtype,
-                                        train=train)
+                                        weight_dtype=layer.weight.dtype)
                 new_layer.device = device
                 if device != torch.device("meta"):
                     new_layer =	new_layer.to(device)
@@ -248,11 +245,10 @@ class QuipQuantizer(object):
                 setattr(module, attr, new_layer)
         for name1, child in module.named_children():
             self._replace_by_quant_layers(
-                child, names, name + "." + name1 if name != "" else name1,
-                train=train)
+                child, names, name + "." + name1 if name != "" else name1)
 
     @torch.no_grad()
-    def quantize_model(self, model: nn.Module, tokenizer: Any):
+    def quantize_model(self, model: nn.Module, tokenizer: Any, save_dir: str = ""):
         """
         Quantizes the model using the dataset
 
@@ -267,6 +263,8 @@ class QuipQuantizer(object):
                       user or organization name, like `dbmdz/bert-base-german-cased`.
                     - A path to a *directory* containing vocabulary files required by the tokenizer, for instance saved
                       using the [`~PreTrainedTokenizer.save_pretrained`] method, e.g., `./my_model_directory/`.
+            save_dir (`str`):
+                Directory to save the checkpoint
         Returns:
             `nn.Module`: The quantized model
         """
@@ -491,7 +489,7 @@ class QuipQuantizer(object):
                     quant_method[name].free()
                 del subset_layers
                 # replace to quant layer
-                self._replace_by_quant_layers(block, subset_name_list, train=True)
+                self._replace_by_quant_layers(block, subset_name_list)
                 for name in subset_name_list:
                     quant_layer = recurse_getattr(block, name)
                     quant_layer.pack(layers[name],
@@ -557,14 +555,15 @@ class QuipQuantizer(object):
                                     break
                     block.eval()
                     block.load_state_dict(best_sd)
-                    for name in subset_name_list:
-                        quant_layer = recurse_getattr(block, name)
-                        del quant_layer.W
                     del optim, train_dataset, valid_dataset
                     torch.cuda.empty_cache()
                     torch.set_grad_enabled(False)
 
-            # put back to device
+            for subset_name_list in subset_name_lists:
+                for name in subset_name_list:
+                    quant_layer = recurse_getattr(block, name)
+                    if hasattr(quant_layer, "W"):
+                        del quant_layer.W
             block = block.to(origin_dtype)
             if not has_device_map:
                 blocks[i] = block.to(device)
@@ -623,13 +622,27 @@ class QuipQuantizer(object):
             if not has_device_map:
                 module = module.to(device)
 
-            model = model.float()
             model.train()
+            if not has_device_map:
+                # let's shard the model with pipeline parallel
+                # this seems to be the easiest to way to implement, though
+                # it's not elegant to use extra save and load
+                temp_dir = save_dir if save_dir else tempfile.mkdtemp()
+                self.save(model, temp_dir)
+                load_checkpoint_and_dispatch(
+                    model,
+                    checkpoint=temp_dir,
+                    device_map="auto",
+                    no_split_module_classes=self.get_no_split_module_classes(model),
+                    dtype=torch.float32,
+                )
+                if not save_dir:
+                    shutil.rmtree(temp_dir)
+            else:
+                model = model.float()
+
             model.gradient_checkpointing_enable(
                 gradient_checkpointing_kwargs={"use_reentrant": False})
-            if not has_device_map:
-                model = model.to(0)
-
             torch.set_grad_enabled(True)
             if not self.ft_embedding:
                 model.get_input_embeddings().weight.requires_grad = False
@@ -647,7 +660,6 @@ class QuipQuantizer(object):
             best_loss = calculate_ce_loss(model, valid_dataset)
             scaler = torch.cuda.amp.GradScaler(enabled=True)
 
-            # best_sd = copy.deepcopy(model.state_dict())
             best_sd = {k: v.cpu() for k, v in model.state_dict().items()}
             logger.info(f"End2end initial loss {best_loss}")
             worse_ct = 0
@@ -677,7 +689,6 @@ class QuipQuantizer(object):
                         )
                         best_loss = test_loss
                         best_sd = {k: v.cpu() for k, v in model.state_dict().items()}
-                        # best_sd = copy.deepcopy(model.state_dict())
                         worse_ct = 0
                     else:
                         worse_ct += 1
@@ -690,12 +701,17 @@ class QuipQuantizer(object):
             model = model.to(origin_dtype)
             torch.set_grad_enabled(False)
 
+        # Step 5: save model
         model.is_quantized = True
         if has_config:
             model.config.use_cache = use_cache
             model.config.quantization_config = self.to_dict()
-
+        # backward compatibility
+        if save_dir:
+            self.save(model, save_dir)
+            tokenizer.save_pretrained(save_dir)
         torch.cuda.empty_cache()
+
         return model
 
 
