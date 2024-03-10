@@ -70,9 +70,9 @@ Finetune with Lora adapter is supported. Please check `example_finetune.py` as a
 ## Speedup
 
 ### torch.compile
-For simplicity I removed the old `gpt-fast` examples and added a simple script based on the `huggingface/transformers` newly introduced static cache.
+For simplicity I removed the old `gpt-fast` examples and added a simple script based on the `huggingface/transformers` newly introduced static cache. Currently the generation speed is about 138 tokens/s for Llama-7b at batchsize=1 using single 4090.
 
-It's slower than `gpt-fast` though. If you wanna use `gpt-fast` example, please refer to the [previous commit](https://github.com/chu-tianxiang/QuIP-for-all/blob/412dd470918f5312a9ed055c2cddf9e2d1d838f5/gpt-fast/generate.py).
+It's slower than `gpt-fast` though (~184 tokens/s). If you wanna use `gpt-fast` example, please refer to the [previous commit](https://github.com/chu-tianxiang/QuIP-for-all/blob/412dd470918f5312a9ed055c2cddf9e2d1d838f5/gpt-fast/generate.py).
 
 ```
 python example_generate.py --model_path llama-70b_2bit_quip --streaming --compile
@@ -81,4 +81,4 @@ python example_generate.py --model_path llama-70b_2bit_quip --streaming --compil
 ### vLLM
 
 Working on the a [custom branch](https://github.com/chu-tianxiang/vllm-gptq/tree/gptq_hf) of vLLM now.
-Unfunately tensor-parallel is not supported because Hadamard transform cannot be done for sharded input. Currently the generation speed is about 86 tokens/s for Llama-7b at batchsize=1 in single A100.
+Unfunately tensor-parallel is not supported because Hadamard transform cannot be done for sharded input. Currently the generation speed benchmarked using `benchmark_latency.py` is about 159 tokens/s for Llama-7b at batchsize=1 using single 4090.
