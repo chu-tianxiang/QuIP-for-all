@@ -83,7 +83,7 @@ class QuipQuantizer(object):
         ft_batch_size: int = 8,
         ft_valid_freq: int = 1,
         ft_early_stop: int = 3,
-        ft_embedding: bool = False,
+        ft_embedding: bool = True,
         *args,
         **kwargs,
     ):

@@ -48,7 +48,7 @@ Arguments of `QuipQuantizer` includes:
 * ft_batch_size: Batch size for the fine-tuning process. The default is 8.
 * ft_valid_freq: The frequency, in epochs, at which the validation is run. The default is every epoch.
 * ft_early_stop: The number of epochs to wait for an improvement in validation loss before early stopping. The default is 3 epochs.
-* ft_embedding: Whether finetune input and output embedding layer during end2end finetune stage. The default is false.
+* ft_embedding: Whether finetune input and output embedding layer during end2end finetune stage, this can reduce perplexity but increase GPU memory usage  The default is true.
 
 ### Inference
 ```python
